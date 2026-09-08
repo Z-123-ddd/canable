@@ -36,6 +36,9 @@ enum can_bus_state bus_state;
 static uint8_t can_autoretransmit = ENABLE;
 static can_txbuf_t txqueue = {0};
 
+// Software RX queue: FDCAN ISR pushes frames here, main loop drains them
+static can_rxbuf_t rxqueue = {0};
+
 
 // DLC code to byte count conversion
 int8_t hal_dlc_code_to_bytes(uint32_t hal_dlc_code)
@@ -174,6 +177,12 @@ void can_enable(void)
         // De-init first to clear state
         FDCAN_DeInit(FDCAN1);
 
+        // Reset software RX/TX queues (drop any stale frames from a previous session)
+        rxqueue.head = 0;
+        rxqueue.tail = 0;
+        txqueue.head = 0;
+        txqueue.tail = 0;
+
         // Apply current bitrate settings
         can_handle.Prescaler = prescaler;
         can_handle.SyncJumpWidth = sync_jump_width;
@@ -203,6 +212,21 @@ void can_enable(void)
         // Start FDCAN
         FDCAN_Start(FDCAN1);
 
+        // Enable FDCAN1 interrupts on line 0:
+        //   - Rx FIFO 0 new message -> ISR drains HW FIFO into software RX queue
+        //   - Bus-Off             -> ISR restarts the CAN controller automatically
+        FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_INTERRUPT_LINE0);
+        FDCAN_ActivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_TX_BUFFER0);
+        FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_INTERRUPT_LINE0);
+        FDCAN_ActivateInt(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_TX_BUFFER0);
+
+        NVIC_InitType nvic;
+        nvic.NVIC_IRQChannel = FDCAN1_INT0_IRQn;
+        nvic.NVIC_IRQChannelPreemptionPriority = 7; // below USB FS LP (6) / SysTick (0)
+        nvic.NVIC_IRQChannelSubPriority = 0;
+        nvic.NVIC_IRQChannelCmd = ENABLE;
+        NVIC_Init(&nvic);
+
         bus_state = ON_BUS;
         led_blue_on();
     }
@@ -214,8 +238,18 @@ void can_disable(void)
 {
     if (bus_state == ON_BUS)
     {
+        // Disable FDCAN1 interrupts first so no ISR can fire while stopping
+        FDCAN_DeactivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE | FDCAN_INT_BUS_OFF);
+
         FDCAN_Stop(FDCAN1);
         FDCAN_DeInit(FDCAN1);
+
+        // Drop any frames still queued in software RX/TX buffers
+        rxqueue.head = 0;
+        rxqueue.tail = 0;
+        txqueue.head = 0;
+        txqueue.tail = 0;
+
         bus_state = OFF_BUS;
         led_green_on();
     }
@@ -343,71 +377,133 @@ void can_set_autoretransmit(uint8_t autoretransmit)
 }
 
 
-// Send a message on the CAN bus. Called from USB ISR.
+// Queue a message for transmission on the CAN bus.
+// Only pushes the frame into the software TX ring buffer; the actual bus
+// transmission is driven by the periodic timer ISR (can_send_timer_tick).
+// When the ring is full the OLDEST unsent frame is overwritten (drop-oldest).
 uint32_t can_tx(FDCAN_TxHeaderType *tx_msg_header, uint8_t *tx_msg_data)
 {
-    // Check if TX queue is full
-    if (((txqueue.head + 1) % TXQUEUE_LEN) == txqueue.tail)
-    {
-        error_assert(ERR_FULLBUF_CANTX);
-        return 1; // Error
-    }
-
     // Convert DLC to bytes
     uint32_t len = hal_dlc_code_to_bytes(tx_msg_header->DataLength);
     if (len > TXQUEUE_DATALEN)
         return 1;
 
+    // Guard head/tail against the timer ISR consuming frames concurrently.
+    __disable_irq();
+
+    // Ring full? Overwrite the oldest queued frame (advance tail).
+    if (((txqueue.head + 1) % TXQUEUE_LEN) == txqueue.tail)
+    {
+        txqueue.tail = (uint16_t)((txqueue.tail + 1) % TXQUEUE_LEN);
+    }
+
     // Save header to circular buffer
     txqueue.header[txqueue.head] = *tx_msg_header;
 
     // Copy data to circular buffer
-    for (uint8_t i = 0; i < len; i++)
+    for (uint32_t i = 0; i < len; i++)
     {
         txqueue.data[txqueue.head][i] = tx_msg_data[i];
     }
 
     // Advance head pointer
-    txqueue.head = (txqueue.head + 1) % TXQUEUE_LEN;
+    txqueue.head = (uint16_t)((txqueue.head + 1) % TXQUEUE_LEN);
+
+    __enable_irq();
 
     return 0; // OK
 }
 
 
-// Receive a CAN message from RX FIFO 0
-uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data)
+// Drain the FDCAN hardware Rx FIFO 0 into the software RX queue.
+// Called from the FDCAN1_INT0 ISR only (single producer).
+// If the software ring is full the OLDEST queued frame is overwritten.
+void can_rx_isr(void)
 {
-    // Read from Rx FIFO 0, index 0 (oldest message)
-    return FDCAN_GetRxMsg(FDCAN1, FDCAN_RX_FIFO0, rx_msg_header, rx_msg_data);
-}
-
-
-// Check if CAN message is pending in RX FIFO
-uint8_t is_can_msg_pending(uint8_t fifo)
-{
-    return (FDCAN_GetRxFifoFillLevel(FDCAN1, fifo) > 0);
-}
-
-
-// Process data from CAN TX circular buffer
-void can_process(void)
-{
-    while ((txqueue.tail != txqueue.head) &&
-           (FDCAN_GetTxFifoFreeLevel(FDCAN1) > 0))
+    while (FDCAN_GetRxFifoFillLevel(FDCAN1, FDCAN_RX_FIFO0) > 0)
     {
-        // Transmit from queue
-        if (FDCAN_AddMsgToTxFifoQ(FDCAN1,
-                                   &txqueue.header[txqueue.tail],
-                                   txqueue.data[txqueue.tail]) == SUCCESS)
+        uint16_t next = (uint16_t)((rxqueue.head + 1) % RXQUEUE_LEN);
+        if (next == rxqueue.tail)
         {
-            // Advance tail pointer
-            txqueue.tail = (txqueue.tail + 1) % TXQUEUE_LEN;
+            // Software ring full -> drop the oldest frame by advancing tail,
+            // then store the new frame over the freed slot.
+            rxqueue.tail = (uint16_t)((rxqueue.tail + 1) % RXQUEUE_LEN);
+            error_assert(ERR_CANRXFIFO_OVERFLOW);
+        }
+
+        if (FDCAN_GetRxMsg(FDCAN1, FDCAN_RX_FIFO0,
+                           &rxqueue.header[rxqueue.head],
+                           rxqueue.data[rxqueue.head]) == SUCCESS)
+        {
+            rxqueue.head = next;
         }
         else
         {
-            // Transmission failed, stay on this buffer
-            error_assert(ERR_CAN_TXFAIL);
             break;
         }
+    }
+}
+
+
+// Receive a CAN message from the software RX queue (drained by main loop).
+// Critical section guards against the FDCAN ISR overwriting the oldest frame
+// while it is being copied out.
+uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data)
+{
+    __disable_irq();
+
+    if (rxqueue.head == rxqueue.tail)
+    {
+        __enable_irq();
+        return ERROR;   // queue empty
+    }
+
+    *rx_msg_header = rxqueue.header[rxqueue.tail];
+
+    int8_t len = hal_dlc_code_to_bytes(rx_msg_header->DataLength);
+    if (len < 0 || len > RXQUEUE_DATALEN)
+    {
+        __enable_irq();
+        return ERROR;
+    }
+    for (int8_t i = 0; i < len; i++)
+        rx_msg_data[i] = rxqueue.data[rxqueue.tail][i];
+
+    rxqueue.tail = (uint16_t)((rxqueue.tail + 1) % RXQUEUE_LEN);
+
+    __enable_irq();
+    return SUCCESS;
+}
+
+
+// Check if a CAN message is pending in the software RX queue
+uint8_t is_can_msg_pending(uint8_t fifo)
+{
+    (void)fifo;   // always drained from software RX queue
+    return (rxqueue.head != rxqueue.tail);
+}
+
+
+// Send one queued frame per call. Invoked by the periodic timer ISR
+// (can_timer) once every configured interval. Sends nothing when:
+//   - the CAN bus is not open (OFF_BUS)
+//   - the TX ring is empty (no data from the host to send)
+//   - the hardware TX FIFO has no free slot (retry on next tick)
+void can_send_timer_tick(void)
+{
+    if (bus_state != ON_BUS)
+        return;
+
+    if (txqueue.tail == txqueue.head)
+        return;   // nothing queued -> do not send
+
+    if (FDCAN_GetTxFifoFreeLevel(FDCAN1) == 0)
+        return;   // HW TX FIFO full -> try again next tick
+
+    if (FDCAN_AddMsgToTxFifoQ(FDCAN1,
+                               &txqueue.header[txqueue.tail],
+                               txqueue.data[txqueue.tail]) == SUCCESS)
+    {
+        txqueue.tail = (uint16_t)((txqueue.tail + 1) % TXQUEUE_LEN);
     }
 }

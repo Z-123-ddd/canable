@@ -22,4 +22,7 @@ void PendSV_Handler(void);
 void USB_FS_LP_IRQHandler(void);
 void USB_FS_WKUP_IRQHandler(void);
 
+// CAN periodic send timer (GTIM1)
+void GTIM1_IRQHandler(void);
+
 #endif

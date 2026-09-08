@@ -41,19 +41,36 @@ enum can_bus_state {
 };
 
 
-// CAN transmit buffering
+// CAN transmit buffering (ring buffer; when full the OLDEST frame is overwritten)
 #define TXQUEUE_LEN     64    // Number of buffers allocated
 #define TXQUEUE_DATALEN 64    // CAN DLC length of data buffers (64 for CANFD)
 
 
 // Cirbuf structure for CAN TX frames
+//   producer: can_tx()  (USB command path, main-loop context)
+//   consumer: can_send_timer_tick() (periodic timer ISR)
 typedef struct cantxbuf_ {
     uint8_t data[TXQUEUE_LEN][TXQUEUE_DATALEN];
     FDCAN_TxHeaderType header[TXQUEUE_LEN];
-    uint16_t head;
-    uint16_t tail;
-    uint8_t full;
+    uint16_t head;   // next slot to write (producer)
+    uint16_t tail;   // next slot to send  (consumer)
 } can_txbuf_t;
+
+
+// CAN receive buffering (ring buffer; when full the OLDEST frame is overwritten)
+#define RXQUEUE_LEN     64    // Number of RX buffers allocated
+#define RXQUEUE_DATALEN 64    // CAN DLC length of data buffers (64 for CANFD)
+
+
+// Cirbuf structure for CAN RX frames
+//   producer: can_rx_isr() (FDCAN ISR, may overwrite oldest on overflow)
+//   consumer: can_rx()     (main loop)
+typedef struct canrxbuf_ {
+    uint8_t data[RXQUEUE_LEN][RXQUEUE_DATALEN];
+    FDCAN_RxHeaderType header[RXQUEUE_LEN];
+    volatile uint16_t head;   // written by ISR only
+    volatile uint16_t tail;   // written by main loop (can_rx) and by ISR on overflow overwrite
+} can_rxbuf_t;
 
 
 // Prototypes
@@ -66,7 +83,8 @@ void can_set_silent(uint8_t silent);
 void can_set_autoretransmit(uint8_t autoretransmit);
 uint32_t can_tx(FDCAN_TxHeaderType *tx_msg_header, uint8_t *tx_msg_data);
 uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data);
-void can_process(void);
+void can_rx_isr(void);        // FDCAN1_INT0 ISR: drain HW FIFO into software RX queue
+void can_send_timer_tick(void);  // periodic timer ISR: send one queued frame (if any)
 uint8_t is_can_msg_pending(uint8_t fifo);
 
 #endif // _CAN_H

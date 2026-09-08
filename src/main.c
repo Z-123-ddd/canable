@@ -12,6 +12,7 @@
 #include "n32h47x_48x_conf.h"
 #include "system.h"
 #include "can.h"
+#include "can_timer.h"
 #include "slcan.h"
 #include "led.h"
 #include "error.h"
@@ -31,6 +32,7 @@ int main(void)
     // Initialize peripherals
     system_init();
     can_init();
+    can_timer_init();
     led_init();
     usb_init();
 
@@ -45,13 +47,12 @@ int main(void)
     while (1)
     {
         led_process();
-        can_process();
         cdc_process();
 
-        // Check for received CAN messages
-        if (is_can_msg_pending(FDCAN_RX_FIFO0))  // RX FIFO 0
+        // Check for received CAN messages (software RX queue filled by FDCAN ISR)
+        while (is_can_msg_pending(FDCAN_RX_FIFO0))
         {
-            // Read CAN frame
+            // Read CAN frame from software RX queue
             if (can_rx(&rx_msg_header, rx_msg_data) == SUCCESS)
             {
                 // Parse frame into SLCAN ASCII format
@@ -62,6 +63,10 @@ int main(void)
                 {
                     cdc_transmit(msg_buf, msg_len);
                 }
+            }
+            else
+            {
+                break;
             }
         }
     }
