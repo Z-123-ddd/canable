@@ -1,0 +1,46 @@
+{
+    // IntelliSense 配置 (JSONC，支持注释)
+    // 说明：Makefile 里编译参数为
+    //   -DHSE_VALUE=24000000 -DN32H473 -DARM_MATH_CM4 [-DINTERNAL_OSCILLATOR]
+    //   -DGIT_VERSION="..." -DGIT_REMOTE="..."
+    // 装好 ARM 工具链后，把 compilerPath 指到 arm-none-eabi-gcc；
+    // 若已加入 PATH，保留 "arm-none-eabi-gcc" 即可（会自动查找）。
+    "version": 4,
+    "env": {
+        // 备选写法（如果 gcc 不在 PATH）：
+        // "ARM_NONE_EABI_GCC": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/13.2.1/bin/arm-none-eabi-gcc.exe"
+    },
+    "configurations": [
+        {
+            "name": "N32H473 (GCC ARM)",
+            "compilerPath": "arm-none-eabi-gcc",
+            "intelliSenseMode": "gcc-arm",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "includePath": [
+                "${workspaceFolder}/Drivers/CMSIS",
+                "${workspaceFolder}/Drivers/N32H47x_48x_HAL_Driver/Inc",
+                "${workspaceFolder}/Drivers/USB_Device_Library/Inc",
+                "${workspaceFolder}/inc",
+                "${workspaceFolder}/src"
+            ],
+            "defines": [
+                "N32H473",
+                "ARM_MATH_CM4",
+                "HSE_VALUE=24000000",
+                "INTERNAL_OSCILLATOR",
+                // 与 Makefile 的 -DGIT_VERSION=\"$(GIT_VERSION)\" 等价
+                "GIT_VERSION=\"\\\"dev\\\"\"",
+                "GIT_REMOTE=\"\\\"\\\"\""
+                // 环形自测可选：与 Makefile 中 -DCAN_LOOPBACK_TEST 对应
+                // "CAN_LOOPBACK_TEST"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ]
+}

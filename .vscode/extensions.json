@@ -1,0 +1,9 @@
+{
+    // 推荐安装的 VS Code 扩展
+    "recommendations": [
+        "ms-vscode.cpptools",            // C/C++ IntelliSense、调试
+        "ms-vscode.makefile-tools",      // Makefile 解析（可代替自定义 tasks）
+        "dan-c-underwood.arm"            // 汇编 .s 文件语法高亮（startup 文件）
+    ],
+    "unwantedRecommendations": []
+}

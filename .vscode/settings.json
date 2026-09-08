@@ -1,0 +1,11 @@
+{
+    // 工作区设置 (JSONC)
+    "search.exclude": {
+        "**/build": true,
+        "**/.codegraph": true
+    },
+    "files.watcherExclude": {
+        "**/build": true
+    },
+    "C_Cpp.intelliSenseEngine": "default"
+}
