@@ -19,12 +19,8 @@
 #include "printf.h"
 #include "usbd_cdc_if.h"
 
-// Firmware identification
+// Firmware identification (kept for future reporting commands)
 char* fw_id = GIT_VERSION " " GIT_REMOTE "\r";
-
-// SLCAN receive buffer
-uint8_t slcan_str[SLCAN_MTU];
-uint8_t slcan_str_index = 0;
 
 
 int main(void)

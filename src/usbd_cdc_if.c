@@ -13,7 +13,7 @@
 #include "usbfsd_lib.h"
 #include "usb_conf.h"
 #include "usbd_cdc_if.h"
-#include "slcan.h"
+#include "usb_proto.h"
 #include "system.h"
 #include "error.h"
 
@@ -110,25 +110,10 @@ void cdc_process(void)
         uint8_t *msg = rxbuf.buf[rxbuf.tail];
         uint32_t len = rxbuf.msglen[rxbuf.tail];
 
-        // Feed each byte through SLCAN parser (character by character)
-        extern uint8_t slcan_str[];
-        extern uint8_t slcan_str_index;
-
+        // Feed every byte into the binary USB protocol parser (byte stream:
+        // frames may span several USB packets, packet boundaries ignored)
         for (uint32_t i = 0; i < len; i++)
-        {
-            if (msg[i] == '\r' || msg[i] == '\n')
-            {
-                if (slcan_str_index > 0)
-                {
-                    slcan_parse_str(slcan_str, slcan_str_index);
-                    slcan_str_index = 0;
-                }
-            }
-            else if (slcan_str_index < SLCAN_MTU - 1)
-            {
-                slcan_str[slcan_str_index++] = msg[i];
-            }
-        }
+            usb_proto_feed(msg[i]);
 
         rxbuf.tail = (rxbuf.tail + 1) % NUM_RX_BUFS;
     }

@@ -36,6 +36,10 @@ enum can_bus_state bus_state;
 static uint8_t can_autoretransmit = ENABLE;
 static can_txbuf_t txqueue = {0};
 
+// Binary USB protocol configuration (defaults used until a command changes them)
+static can_id_format_t can_id_format = CAN_ID_FORMAT_STANDARD;
+static can_send_mode_t can_send_mode = CAN_SEND_MODE_TXRING;
+
 // Software RX queue: FDCAN ISR pushes frames here, main loop drains them
 static can_rxbuf_t rxqueue = {0};
 
@@ -62,6 +66,54 @@ int8_t hal_dlc_code_to_bytes(uint32_t hal_dlc_code)
         case FDCAN_DLC_BYTES_64: return 64;
         default: return -1;
     }
+}
+
+
+// Convert a raw nibble DLC code (0-15, incl. CAN FD codes) to an N32 HAL DLC code.
+// Shared by the binary USB protocol (data-frame control byte low nibble).
+uint32_t can_dlc_code_to_hal_dlc(uint8_t dlc_code)
+{
+    if (dlc_code <= 8)
+        return (uint32_t)(dlc_code << 16);   // 0-8 map directly to FDCAN DLC bytes
+    else if (dlc_code == 9)
+        return FDCAN_DLC_BYTES_12;
+    else if (dlc_code == 10)
+        return FDCAN_DLC_BYTES_16;
+    else if (dlc_code == 11)
+        return FDCAN_DLC_BYTES_20;
+    else if (dlc_code == 12)
+        return FDCAN_DLC_BYTES_24;
+    else if (dlc_code == 13)
+        return FDCAN_DLC_BYTES_32;
+    else if (dlc_code == 14)
+        return FDCAN_DLC_BYTES_48;
+    else if (dlc_code == 15)
+        return FDCAN_DLC_BYTES_64;
+    else
+        return FDCAN_DLC_BYTES_8;
+}
+
+
+// ---- Binary USB protocol configuration (ID width / send mode) ----
+
+void can_set_id_format(can_id_format_t fmt)
+{
+    can_id_format = fmt;
+}
+
+can_id_format_t can_get_id_format(void)
+{
+    return can_id_format;
+}
+
+void can_set_send_mode(can_send_mode_t mode)
+{
+    can_send_mode = mode;
+}
+
+can_send_mode_t can_get_send_mode(void)
+{
+    return can_send_mode;
 }
 
 
@@ -119,9 +171,9 @@ void can_init(void)
     // Build FDCAN init structure (no InitStruct function in N32 HAL — zero it out)
     memset(&can_handle, 0, sizeof(can_handle));
 
-    // Default to 1M nominal, 2M data
+    // Default to 1M nominal arbitration, 5M FD data (CAN FD max rate)
     can_set_bitrate(CAN_BITRATE_1000K);
-    can_set_data_bitrate(CAN_DATA_BITRATE_2M);
+    can_set_data_bitrate(CAN_DATA_BITRATE_5M);  // FD data segment default: 5M (CAN FD max)
 
     can_handle.FrameFormat = FDCAN_FRAME_FD_BRS;
 #ifdef CAN_LOOPBACK_TEST
@@ -341,6 +393,12 @@ void can_set_bitrate(enum can_bitrate bitrate)
             time_seg1 = 21;
             time_seg2 = 5;
             break;
+        case CAN_BITRATE_5000K: // 40M / (1*(5+2+1)) = 5M, sample 6/8 = 75%
+            prescaler = 1;
+            sync_jump_width = 1;
+            time_seg1 = 5;
+            time_seg2 = 2;
+            break;
         case CAN_BITRATE_1000K:
         default:
             prescaler = 1;
@@ -350,6 +408,54 @@ void can_set_bitrate(enum can_bitrate bitrate)
             break;
     }
     led_green_on();
+}
+
+
+// Apply a nominal bitrate expressed in Hz (10k..1M + 83.3k, same set as the
+// S<n> command). Accepts values within 2% of the table. When the bus is
+// already open it is restarted so the new rate takes effect immediately.
+// Returns 0 on success, -1 for an unsupported rate.
+int32_t can_apply_bitrate_hz(uint32_t hz)
+{
+    // Macro-based lookup (no table). Exact Hz match against the supported
+    // nominal rates; see CAN_BITRATE_HZ_* macros in can.h.
+    enum can_bitrate match;
+    if (hz == CAN_BITRATE_HZ_5000K)
+        match = CAN_BITRATE_5000K;
+    else if (hz == CAN_BITRATE_HZ_1000K)
+        match = CAN_BITRATE_1000K;
+    else if (hz == CAN_BITRATE_HZ_750K)
+        match = CAN_BITRATE_750K;
+    else if (hz == CAN_BITRATE_HZ_500K)
+        match = CAN_BITRATE_500K;
+    else if (hz == CAN_BITRATE_HZ_250K)
+        match = CAN_BITRATE_250K;
+    else if (hz == CAN_BITRATE_HZ_125K)
+        match = CAN_BITRATE_125K;
+    else if (hz == CAN_BITRATE_HZ_100K)
+        match = CAN_BITRATE_100K;
+    else if (hz == CAN_BITRATE_HZ_83_3K)
+        match = CAN_BITRATE_83_3K;
+    else if (hz == CAN_BITRATE_HZ_50K)
+        match = CAN_BITRATE_50K;
+    else if (hz == CAN_BITRATE_HZ_20K)
+        match = CAN_BITRATE_20K;
+    else if (hz == CAN_BITRATE_HZ_10K)
+        match = CAN_BITRATE_10K;
+    else
+        return -1;
+
+    if (bus_state == ON_BUS)
+    {
+        can_disable();          // stop & drop queues (set_bitrate is a no-op while ON_BUS)
+        can_set_bitrate(match);
+        can_enable();           // re-init, re-start, re-enable interrupts
+    }
+    else
+    {
+        can_set_bitrate(match);
+    }
+    return 0;
 }
 
 
