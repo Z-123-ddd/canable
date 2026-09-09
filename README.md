@@ -1,5 +1,9 @@
 # CANable 2.0 Firmware
 
+> **说明**: 本固件已从 slcan ASCII 切换到二进制 USB 协议, 命令与格式详见
+> **[docs/FIRMWARE_PROTOCOL.md](docs/FIRMWARE_PROTOCOL.md)** (固件说明书)。
+> 下述 Supported Commands 为历史版本记录, 可能已过时。
+
 This repository contains sources for the slcan CANable 2.0 firmware. This firmware implements non-standard slcan commands to support CANFD messaging alongside a LAWICEL-style command set.
 
 ## Supported Commands
