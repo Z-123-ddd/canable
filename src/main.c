@@ -39,6 +39,10 @@ int main(void)
     // Power-on blink sequence
     led_blue_blink(2);
 
+    // Start FDCAN1 and enable its RX/bus-off interrupts by default
+    // (auto-open on boot; no need to send 'O' first. 'C' still closes it.)
+    can_enable();
+
     // Storage for CAN RX message
     FDCAN_RxHeaderType rx_msg_header;
     uint8_t rx_msg_data[64] = {0};
