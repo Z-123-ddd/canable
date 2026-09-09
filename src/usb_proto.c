@@ -20,6 +20,7 @@
 #include "usb_proto.h"
 #include "can.h"
 #include "can_timer.h"
+#include "dfu.h"
 #include "error.h"
 #include "usbd_cdc_if.h"
 
@@ -143,6 +144,13 @@ static void proto_cmd_dispatch(void)
                 cdc_transmit((uint8_t *)st, n);
             break;
         }
+
+        case USB_PROTO_CMD_ID_ENTER_DFU:
+            // Stop any TX job first, then jump to the bootloader.
+            can_tx_stop();
+            can_timer_disable();
+            dfu_enter_bootloader();   // never returns on success
+            break;
 
         default:
             error_assert(ERR_USB_BADFRAME);

@@ -48,9 +48,13 @@
 //   id 3: stop a running send job.
 //   id 4: query status. The MCU replies with one ASCII line built by
 //         can_format_status() (bus/mode/job/timer/cur/pend/act/err).
+//   id 5: enter DFU (system bootloader). The MCU switches the clock to
+//         HSI and jumps into the factory bootloader (0x1FFF01A1); it does
+//         NOT come back - the host can then download firmware over DFU.
 #define USB_PROTO_CMD_ID_TX_START     2
 #define USB_PROTO_CMD_ID_TX_STOP      3
 #define USB_PROTO_CMD_ID_GET_STATUS  4
+#define USB_PROTO_CMD_ID_ENTER_DFU   5
 
 
 // ---- Data frames (AA AB) ----
