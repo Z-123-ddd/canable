@@ -1,18 +1,18 @@
 /**
  * @file    can_frame_list.h
- * @brief   Frame list cache for the host "frame list mode" (CANable2-N32)
+ * @brief   Frame-list cache (double buffer) for the "list mode" TX path
  *
- * Ordered storage for up to CAN_FRAME_LIST_MAX_FRAMES TX frames, each
- * described by a full FDCAN_TxHeaderType plus up to
- * CAN_FRAME_LIST_MAX_DLC data bytes. Supports classic CAN and CAN FD.
+ * List mode receives a burst of USB data frames from the host and replays
+ * them (single FIFO pass, or cycled by the periodic timer), exactly like the
+ * single-frame path except that the source is a list.
  *
- * This buffer is DISTINCT from the TX ring buffer used for one-shot sends
- * (can_tx() / txqueue in can.c, which stays a FIFO). The frame list is
- * meant to serve a host-side frame-list mode, i.e. periodic looped
- * transmission of a list of frames.
+ * Two buffers are kept:
+ *   - pending : where incoming USB data frames accumulate (host writes)
+ *   - active  : the committed list that the TX pump (timer ISR) replays
  *
- * NOTE: only the storage + management API lives here for now. The USB
- * command/protocol wiring and the periodic send loop are added later.
+ * A TX-start command "commits" the pending burst: if it is non-empty it
+ * replaces the active list (copy under interrupts disabled), otherwise the
+ * previous active list is kept (data unchanged -> command only).
  */
 
 #ifndef _CAN_FRAME_LIST_H
@@ -21,25 +21,30 @@
 #include <stdint.h>
 #include "n32h47x_48x.h"
 
+// List limits (host guarantees no more than 20 frames per burst)
+#define CAN_FRAME_LIST_MAX_FRAMES   20U
+#define CAN_FRAME_LIST_MAX_DLC      64U
 
-// Frame list limits
-#define CAN_FRAME_LIST_MAX_FRAMES   20U   // Max number of frames in the list
-#define CAN_FRAME_LIST_MAX_DLC      64U   // Max data bytes per frame (CAN FD)
-
-
-// One entry of the frame list: full TX description + payload
+// One list entry: full TX description + payload
 typedef struct {
-    FDCAN_TxHeaderType header;              // ID, frame type (classic/FD), BRS, DLC, ...
-    uint8_t data[CAN_FRAME_LIST_MAX_DLC];   // payload (valid bytes = DLC of header)
+    FDCAN_TxHeaderType header;
+    uint8_t data[CAN_FRAME_LIST_MAX_DLC];
 } can_frame_list_frame_t;
 
+// Reset both buffers (call on bus enable/disable)
+void can_frame_list_init(void);
 
-// Prototypes
-void  can_frame_list_init(void);                       // reset the list (empty)
-int32_t can_frame_list_add(const FDCAN_TxHeaderType *header,
-                           const uint8_t *data);       // append at end; -1 if full/invalid
-void  can_frame_list_clear(void);                      // remove all frames
-uint16_t can_frame_list_count(void);                   // number of valid frames
-const can_frame_list_frame_t *can_frame_list_get(uint16_t idx);  // NULL if out of range
+// ---- pending (host data frames accumulate here) ----
+void    can_frame_list_pending_clear(void);          // start a new burst
+int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,
+                                   const uint8_t *data); // -1 if full/invalid
+uint16_t can_frame_list_pending_count(void);
+
+// ---- commit (TX-start command): pending -> active, replacing the old list ----
+void can_frame_list_commit(void);
+
+// ---- active (read by the TX pump ISR only) ----
+uint16_t can_frame_list_active_count(void);
+const can_frame_list_frame_t *can_frame_list_active_get(uint16_t idx); // NULL if oob
 
 #endif /* _CAN_FRAME_LIST_H */

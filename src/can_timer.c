@@ -83,7 +83,8 @@ void can_timer_init(void)
 }
 
 
-// Master switch for the timed transmission (default OFF)
+// Legacy master-switch setter (kept for compatibility; new code should use
+// can_timer_enable()/can_timer_disable() below).
 void can_timer_set_enabled(uint8_t enabled)
 {
     can_timer_enabled = enabled ? 1 : 0;
@@ -93,6 +94,23 @@ void can_timer_set_enabled(uint8_t enabled)
 uint8_t can_timer_is_enabled(void)
 {
     return can_timer_enabled;
+}
+
+
+// Software-enable the periodic TX pump (reserved for a future USB command).
+// GTIM1 keeps running and its update interrupt stays enabled; this only lets
+// the ISR service ticks again (see can_timer_disable).
+void can_timer_enable(void)
+{
+    can_timer_enabled = 1;
+}
+
+
+// Software-disable the periodic TX pump: ticks are no longer serviced, so
+// nothing is transmitted from the cached frames until enable() is called.
+void can_timer_disable(void)
+{
+    can_timer_enabled = 0;
 }
 
 

@@ -56,12 +56,26 @@ typedef enum can_id_format_ {
 } can_id_format_t;
 
 
-// Where USB data frames go (selected by a future command frame; the global
-// defaults to TX-ring send mode and the frame-list mode stores into the cache)
+// Where USB data frames go (selected by a command / API; default single
+// frame). List mode is identical to single-frame mode except that the host
+// sends a burst of data frames which are stored FIFO and replayed.
 typedef enum can_send_mode_ {
-    CAN_SEND_MODE_TXRING = 0,     // normal send: frames -> TX ring FIFO (can_tx)
-    CAN_SEND_MODE_FRAMELIST,      // frame-list mode: frames -> can_frame_list cache
+    CAN_SEND_MODE_SINGLE = 0,   // data frame -> 'most recent frame' cache
+    CAN_SEND_MODE_FRAMELIST,    // data frames -> pending list (burst)
 } can_send_mode_t;
+
+
+// How a TX job is triggered (the trigger APIs in can.c; a future USB command
+// will call these to start sending). In SINGLE mode the source is the cached
+// 'most recent frame'; in FRAMELIST mode it is the committed list.
+//   SINGLE     -> send the source once and stop.
+//   CONTINUOUS -> periodic: keep sending on every timer tick (re-send the
+//                 single frame, or step through the list FIFO and wrap;
+//                 independent of USB traffic once started).
+typedef enum can_tx_trigger_ {
+    CAN_TX_TRIGGER_SINGLE = 0,
+    CAN_TX_TRIGGER_CONTINUOUS,
+} can_tx_trigger_t;
 
 
 // Bus state
@@ -71,20 +85,13 @@ enum can_bus_state {
 };
 
 
-// CAN transmit buffering (ring buffer; when full the OLDEST frame is overwritten)
-#define TXQUEUE_LEN     64    // Number of buffers allocated
-#define TXQUEUE_DATALEN 64    // CAN DLC length of data buffers (64 for CANFD)
-
-
-// Cirbuf structure for CAN TX frames
-//   producer: can_tx()  (USB command path, main-loop context)
-//   consumer: can_send_timer_tick() (periodic timer ISR)
-typedef struct cantxbuf_ {
-    uint8_t data[TXQUEUE_LEN][TXQUEUE_DATALEN];
-    FDCAN_TxHeaderType header[TXQUEUE_LEN];
-    uint16_t head;   // next slot to write (producer)
-    uint16_t tail;   // next slot to send  (consumer)
-} can_txbuf_t;
+// ---- TX model ----
+// USB data frames are handled by can_tx_data(): in single mode the frame is
+// cached in RAM as the 'most recent frame'; in list mode each frame of a host
+// burst is appended to the pending list. Nothing is transmitted directly - a
+// trigger (can_tx_start SINGLE/CONTINUOUS) decides when the cached source goes
+// on the bus. A periodic job keeps re-sending it (single frame, or list steps)
+// on every timer tick, independent of USB traffic.
 
 
 // CAN receive buffering (ring buffer; when full the OLDEST frame is overwritten)
@@ -112,10 +119,10 @@ void can_set_data_bitrate(enum can_data_bitrate bitrate);
 void can_set_silent(uint8_t silent);
 void can_set_autoretransmit(uint8_t autoretransmit);
 
-// Binary-protocol configuration (defaults: standard ID + TX-ring mode)
-void can_set_id_format(can_id_format_t fmt);
+// Binary-protocol configuration
+void can_set_id_format(can_id_format_t fmt);          // default: standard
 can_id_format_t can_get_id_format(void);
-void can_set_send_mode(can_send_mode_t mode);
+void can_set_send_mode(can_send_mode_t mode);         // default: single frame
 can_send_mode_t can_get_send_mode(void);
 
 // Apply a nominal bitrate given in Hz. Returns 0 on success, -1 when the
@@ -129,10 +136,25 @@ uint32_t can_dlc_code_to_hal_dlc(uint8_t dlc_code);
 // Convert an FDCAN HAL DLC code to a payload byte count (0..64, -1 invalid)
 int8_t hal_dlc_code_to_bytes(uint32_t hal_dlc_code);
 
-uint32_t can_tx(FDCAN_TxHeaderType *tx_msg_header, uint8_t *tx_msg_data);
 uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data);
 void can_rx_isr(void);        // FDCAN1_INT0 ISR: drain HW FIFO into software RX queue
-void can_send_timer_tick(void);  // periodic timer ISR: send one queued frame (if any)
+void can_send_timer_tick(void);  // periodic timer ISR (see can.c state machine)
 uint8_t is_can_msg_pending(uint8_t fifo);
+
+// ---- Host data / TX job control (single vs continuous send) ----
+// Data-frame entry from the binary USB protocol: store the frame as the
+// 'most recent frame' in RAM. Nothing is transmitted directly - the trigger
+// (can_tx_start) decides when it goes on the bus.
+void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data);
+
+// Start a send job on the cached frame.
+//   SINGLE     -> send it once and stop.
+//   CONTINUOUS -> keep re-sending it on every timer tick.
+// Returns 0 on success, -1 when there is no cached frame to send.
+int32_t can_tx_start(can_tx_trigger_t trigger);
+// Abort any running TX job (stops the periodic pump).
+void can_tx_stop(void);
+// True while a periodic TX job is running.
+uint8_t can_tx_job_running(void);
 
 #endif // _CAN_H

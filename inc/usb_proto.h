@@ -41,6 +41,16 @@
 #define USB_PROTO_CMD_LEN      5      // cmd id (1) + value (4)
 #define USB_PROTO_CMD_ID_SET_BITRATE   1   // value = nominal bitrate in Hz
 
+// Reserved command ids for future TX control (NOT handled yet by the MCU):
+//   id 2: start sending the cached frame. value selects the trigger:
+//           0 = single shot (send the cached frame once)
+//           1 = continuous  (periodic resend on every timer tick)
+//   id 3: stop a running send job.
+// These ids differ from the SET_BITRATE command; the parser currently
+// rejects them with ERR_USB_BADFRAME until they are wired up.
+#define USB_PROTO_CMD_ID_TX_START     2
+#define USB_PROTO_CMD_ID_TX_STOP      3
+
 
 // ---- Data frames (AA AB) ----
 #define USB_PROTO_CTRL_FDF     0x80U  // CAN FD format

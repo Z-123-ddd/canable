@@ -19,6 +19,8 @@
 #include "n32h47x_48x_conf.h"
 #include <string.h>
 #include "can.h"
+#include "can_timer.h"
+#include "can_frame_list.h"
 #include "led.h"
 #include "error.h"
 #include "system.h"
@@ -34,14 +36,27 @@ static uint32_t prescaler, sync_jump_width, time_seg1, time_seg2;
 static uint32_t data_prescaler, data_sync_jump_width, data_time_seg1, data_time_seg2;
 enum can_bus_state bus_state;
 static uint8_t can_autoretransmit = ENABLE;
-static can_txbuf_t txqueue = {0};
 
 // Binary USB protocol configuration (defaults used until a command changes them)
 static can_id_format_t can_id_format = CAN_ID_FORMAT_STANDARD;
-static can_send_mode_t can_send_mode = CAN_SEND_MODE_TXRING;
+static can_send_mode_t can_send_mode = CAN_SEND_MODE_SINGLE;
 
 // Software RX queue: FDCAN ISR pushes frames here, main loop drains them
 static can_rxbuf_t rxqueue = {0};
+
+// ---- TX job state (single shot / continuous) ----
+// 'Most recent frame' cache: source for immediate single send and for the
+// continuous single-frame job. Written by can_tx_data() (main-loop / USB
+// context) under critical section; read by the timer ISR.
+static FDCAN_TxHeaderType cur_tx_hdr;
+static uint8_t cur_tx_data[64];
+static uint8_t cur_tx_valid = 0;
+
+// Running TX job state.  Updated only with interrupts disabled
+// (can_tx_start / can_tx_stop); read by can_send_timer_tick.
+static uint8_t tx_job_active = 0;          // 1 = a periodic job is being pumped
+static uint8_t tx_job_single_pass = 0;     // FRAMELIST: 1 = stop after one pass
+static uint16_t tx_list_pos = 0;           // FRAMELIST: FIFO cursor into active list
 
 
 // DLC code to byte count conversion
@@ -94,7 +109,7 @@ uint32_t can_dlc_code_to_hal_dlc(uint8_t dlc_code)
 }
 
 
-// ---- Binary USB protocol configuration (ID width / send mode) ----
+// ---- Binary USB protocol configuration (ID width) ----
 
 void can_set_id_format(can_id_format_t fmt)
 {
@@ -229,11 +244,14 @@ void can_enable(void)
         // De-init first to clear state
         FDCAN_DeInit(FDCAN1);
 
-        // Reset software RX/TX queues (drop any stale frames from a previous session)
+        // Reset state (drop stale frames / stop any TX job)
         rxqueue.head = 0;
         rxqueue.tail = 0;
-        txqueue.head = 0;
-        txqueue.tail = 0;
+        cur_tx_valid = 0;
+        tx_job_active = 0;
+        tx_job_single_pass = 0;
+        tx_list_pos = 0;
+        can_frame_list_init();
 
         // Apply current bitrate settings
         can_handle.Prescaler = prescaler;
@@ -296,11 +314,14 @@ void can_disable(void)
         FDCAN_Stop(FDCAN1);
         FDCAN_DeInit(FDCAN1);
 
-        // Drop any frames still queued in software RX/TX buffers
+        // Drop any frames still queued / stop any TX job
         rxqueue.head = 0;
         rxqueue.tail = 0;
-        txqueue.head = 0;
-        txqueue.tail = 0;
+        cur_tx_valid = 0;
+        tx_job_active = 0;
+        tx_job_single_pass = 0;
+        tx_list_pos = 0;
+        can_frame_list_init();
 
         bus_state = OFF_BUS;
         led_green_on();
@@ -483,41 +504,135 @@ void can_set_autoretransmit(uint8_t autoretransmit)
 }
 
 
-// Queue a message for transmission on the CAN bus.
-// Only pushes the frame into the software TX ring buffer; the actual bus
-// transmission is driven by the periodic timer ISR (can_send_timer_tick).
-// When the ring is full the OLDEST unsent frame is overwritten (drop-oldest).
-uint32_t can_tx(FDCAN_TxHeaderType *tx_msg_header, uint8_t *tx_msg_data)
+// ---------------------------------------------------------------------------
+// TX engine: single-shot vs continuous (periodic) sending.
+//
+// Data frames from the USB host arrive via can_tx_data() and are cached in RAM
+// as the 'most recent frame'; nothing is transmitted until a trigger starts a
+// job. A job (can_tx_start) then makes the periodic timer ISR
+// (can_send_timer_tick) transmit the cached frame:
+//   trigger SINGLE     -> send the cached frame once (can_tx_start does it
+//                          directly, no timer needed)
+//   trigger CONTINUOUS -> re-send the cached frame on every timer tick
+// ---------------------------------------------------------------------------
+
+// Write one frame to the FDCAN hardware TX FIFO (fire-and-forget).
+// Returns 1 when queued to the hardware, 0 when the bus is off / HW FIFO full.
+static uint8_t can_tx_hw(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
 {
-    // Convert DLC to bytes
-    uint32_t len = hal_dlc_code_to_bytes(tx_msg_header->DataLength);
-    if (len > TXQUEUE_DATALEN)
+    if (bus_state != ON_BUS)
+        return 0;
+    if (FDCAN_GetTxFifoFreeLevel(FDCAN1) == 0)
+        return 0;
+    if (FDCAN_AddMsgToTxFifoQ(FDCAN1, (FDCAN_TxHeaderType *)hdr,
+                               (uint8_t *)data) == SUCCESS)
         return 1;
+    return 0;
+}
 
-    // Guard head/tail against the timer ISR consuming frames concurrently.
+// Host data-frame entry point (called from the binary USB protocol parser).
+// A data frame only loads the cache in RAM - it is never transmitted
+// directly; a TX command (can_tx_start / future USB command) decides when
+// the cached source goes on the bus. In single mode the frame replaces the
+// 'most recent frame'; in list mode it is appended to the pending burst
+// (FIFO). A burst longer than the list capacity is refused.
+void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
+{
+    if (hdr == NULL)
+        return;
+
+    if (can_send_mode == CAN_SEND_MODE_FRAMELIST)
+    {
+        // Append this frame to the pending burst (FIFO).
+        if (can_frame_list_pending_add(hdr, data) != 0)
+            error_assert(ERR_FRAMELIST_FULL);
+        return;
+    }
+
+    // Single-frame mode: remember this frame as the most recent one.
+    int8_t len = hal_dlc_code_to_bytes(hdr->DataLength);
+    if (len < 0)
+        return;
+    if (len > (int8_t)sizeof(cur_tx_data))
+        return;
+
     __disable_irq();
+    cur_tx_hdr = *hdr;
+    for (int8_t i = 0; i < len; i++)
+        cur_tx_data[i] = data[i];
+    cur_tx_valid = 1;
+    __enable_irq();
+}
 
-    // Ring full? Overwrite the oldest queued frame (advance tail).
-    if (((txqueue.head + 1) % TXQUEUE_LEN) == txqueue.tail)
+// Start a transmit job on the cached source.
+//   SINGLE     -> send the source once and stop. Single mode: the cached
+//                 frame is fired immediately (no timer needed). List mode:
+//                 the pending burst is committed (replacing the old list,
+//                 or kept when no new data arrived) and then replayed once
+//                 in FIFO order by the timer pump.
+//   CONTINUOUS -> keep sending on every timer tick (single frame re-sent, or
+//                 list stepped FIFO and wrapped).
+// Returns 0 on success, -1 when there is nothing to send.
+int32_t can_tx_start(can_tx_trigger_t trigger)
+{
+    if (can_send_mode == CAN_SEND_MODE_FRAMELIST)
     {
-        txqueue.tail = (uint16_t)((txqueue.tail + 1) % TXQUEUE_LEN);
+        // Commit: a non-empty pending burst replaces the active list; an empty
+        // pending (host sent command without new data) keeps the last list.
+        can_frame_list_commit();
+        if (can_frame_list_active_count() == 0)
+            return -1;   // nothing committed to send
+
+        __disable_irq();
+        tx_list_pos = 0;
+        tx_job_single_pass = (trigger == CAN_TX_TRIGGER_SINGLE) ? 1 : 0;
+        tx_job_active = 1;   // the timer pump steps through the active list
+        __enable_irq();
+        return 0;
     }
 
-    // Save header to circular buffer
-    txqueue.header[txqueue.head] = *tx_msg_header;
-
-    // Copy data to circular buffer
-    for (uint32_t i = 0; i < len; i++)
+    // ---- single-frame mode ----
+    __disable_irq();
+    if (trigger == CAN_TX_TRIGGER_SINGLE)
     {
-        txqueue.data[txqueue.head][i] = tx_msg_data[i];
+        if (!cur_tx_valid)
+        {
+            __enable_irq();
+            return -1;
+        }
+        // Single shot of the most recent frame: no periodic job needed.
+        tx_job_active = 0;
+        __enable_irq();
+        return can_tx_hw(&cur_tx_hdr, cur_tx_data) ? 0 : -1;
     }
-
-    // Advance head pointer
-    txqueue.head = (uint16_t)((txqueue.head + 1) % TXQUEUE_LEN);
+    else /* CONTINUOUS */
+    {
+        if (!cur_tx_valid)
+        {
+            __enable_irq();
+            return -1;
+        }
+        tx_job_active = 1;
+    }
 
     __enable_irq();
+    return 0;
+}
 
-    return 0; // OK
+// Abort any running TX job (stops the periodic pump).
+void can_tx_stop(void)
+{
+    __disable_irq();
+    tx_job_active = 0;
+    tx_job_single_pass = 0;
+    tx_list_pos = 0;
+    __enable_irq();
+}
+
+// True while a periodic TX job is running.
+uint8_t can_tx_job_running(void)
+{
+    return tx_job_active;
 }
 
 
@@ -590,26 +705,64 @@ uint8_t is_can_msg_pending(uint8_t fifo)
 }
 
 
-// Send one queued frame per call. Invoked by the periodic timer ISR
-// (can_timer) once every configured interval. Sends nothing when:
-//   - the CAN bus is not open (OFF_BUS)
-//   - the TX ring is empty (no data from the host to send)
-//   - the hardware TX FIFO has no free slot (retry on next tick)
+// Periodic pump, invoked by the GTIM1 timer ISR at the configured interval.
+// Only acts while a periodic TX job is active (see can_tx_start CONTINUOUS):
+// re-send the cached 'most recent frame'. A SINGLE job is fired directly in
+// can_tx_start and never activates the timer pump.
+// Periodic pump, invoked by the GTIM1 timer ISR at the configured interval.
+// Only acts while a TX job is active (see can_tx_start):
+//   single-frame mode  -> re-send the cached 'most recent frame'
+//   list mode          -> send the next active-list frame (FIFO); stop after
+//                          one pass (SINGLE) or wrap and keep cycling
+//                          (CONTINUOUS).
 void can_send_timer_tick(void)
 {
     if (bus_state != ON_BUS)
         return;
 
-    if (txqueue.tail == txqueue.head)
-        return;   // nothing queued -> do not send
+    if (!tx_job_active)
+        return;
 
-    if (FDCAN_GetTxFifoFreeLevel(FDCAN1) == 0)
-        return;   // HW TX FIFO full -> try again next tick
-
-    if (FDCAN_AddMsgToTxFifoQ(FDCAN1,
-                               &txqueue.header[txqueue.tail],
-                               txqueue.data[txqueue.tail]) == SUCCESS)
+    if (can_send_mode == CAN_SEND_MODE_FRAMELIST)
     {
-        txqueue.tail = (uint16_t)((txqueue.tail + 1) % TXQUEUE_LEN);
+        uint16_t n = can_frame_list_active_count();
+        if (n == 0)
+        {
+            can_tx_stop();
+            return;
+        }
+
+        if (tx_list_pos >= n)
+            tx_list_pos = 0;
+
+        const can_frame_list_frame_t *f = can_frame_list_active_get(tx_list_pos);
+        if (f == NULL)
+        {
+            can_tx_stop();
+            return;
+        }
+
+        if (!can_tx_hw(&f->header, f->data))
+            return;   // HW FIFO full: retry on the next tick (cursor not moved)
+
+        tx_list_pos++;
+        if (tx_job_single_pass)
+        {
+            // One FIFO pass only: stop once the whole list has been sent.
+            if (tx_list_pos >= n)
+                can_tx_stop();
+        }
+        else /* CONTINUOUS */
+        {
+            if (tx_list_pos >= n)
+                tx_list_pos = 0;   // wrap around and keep cycling
+        }
+        return;
     }
+
+    // single-frame mode: only a CONTINUOUS job reaches here (SINGLE is fired
+    // directly in can_tx_start and never activates the timer pump).
+    if (!cur_tx_valid)
+        return;
+    can_tx_hw(&cur_tx_hdr, cur_tx_data);
 }

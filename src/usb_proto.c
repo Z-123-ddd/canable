@@ -19,7 +19,6 @@
 #include "n32h47x_48x_conf.h"
 #include "usb_proto.h"
 #include "can.h"
-#include "can_frame_list.h"
 #include "error.h"
 
 
@@ -153,16 +152,9 @@ static void proto_data_dispatch(void)
 
     hdr.DataLength = can_dlc_code_to_hal_dlc(ctrl_byte & USB_PROTO_CTRL_DLC_M);
 
-    // 3. Send per the current mode
-    if (can_get_send_mode() == CAN_SEND_MODE_FRAMELIST)
-    {
-        if (can_frame_list_add(&hdr, datap) != 0)
-            error_assert(ERR_FRAMELIST_FULL);
-    }
-    else
-    {
-        can_tx(&hdr, (uint8_t *)datap);
-    }
+    // 3. Hand the frame to the TX engine (caches it in RAM; transmission is
+    //    triggered by a later TX command via can_tx_start).
+    can_tx_data(&hdr, datap);
 }
 
 

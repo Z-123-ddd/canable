@@ -20,7 +20,7 @@ typedef enum _error_t
     ERR_FULLBUF_USBTX,
     ERR_USB_BADFRAME,     // malformed binary USB frame / unsupported command
     ERR_USB_CRC,          // binary USB frame CRC mismatch
-    ERR_FRAMELIST_FULL,   // frame-list cache full when adding a frame
+    ERR_FRAMELIST_FULL,   // list-mode burst longer than CAN_FRAME_LIST_MAX_FRAMES
 
     ERR_MAX
 } error_t;

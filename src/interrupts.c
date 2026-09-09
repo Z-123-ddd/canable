@@ -95,8 +95,10 @@ void FDCAN1_INT0_IRQHandler(void)
 
 
 // Periodic send timer (GTIM1, configured in can_timer_init()). Always runs and
-// interrupts at the configured interval (default 1ms); the enable switch
-// (default OFF) decides whether each tick triggers a CAN send.
+// interrupts at the configured interval (default 1ms). The ISR is gated by a
+// software flag (can_timer_enable/can_timer_disable, default OFF): only when
+// enabled does each tick drive the CAN TX job pump, which reads the frame(s)
+// cached in RAM (single recent frame or frame list) - independent of USB.
 void GTIM1_IRQHandler(void)
 {
     TIM_ClrIntPendingBit(GTIM1, TIM_INT_UPDATE);
@@ -104,6 +106,6 @@ void GTIM1_IRQHandler(void)
     if (!can_timer_is_enabled())
         return;
 
-    // Send one queued frame from the TX ring (no-op if empty / bus off)
+    // Drive the TX job pump (no-op when no job is active / bus off)
     can_send_timer_tick();
 }
