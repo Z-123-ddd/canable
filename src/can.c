@@ -619,7 +619,8 @@ int32_t can_tx_start(can_tx_trigger_t trigger)
     return 0;
 }
 
-// Abort any running TX job (stops the periodic pump).
+// Abort any running TX job (stops the periodic pump) and disables the
+// periodic timer so no tick is serviced while idle.
 void can_tx_stop(void)
 {
     __disable_irq();
@@ -627,6 +628,7 @@ void can_tx_stop(void)
     tx_job_single_pass = 0;
     tx_list_pos = 0;
     __enable_irq();
+    can_timer_disable();
 }
 
 // True while a periodic TX job is running.
@@ -765,4 +767,91 @@ void can_send_timer_tick(void)
     if (!cur_tx_valid)
         return;
     can_tx_hw(&cur_tx_hdr, cur_tx_data);
+}
+
+
+// ---- Host status reporting (GET_STATUS command) ----
+// One-line ASCII report so the host can see, after a command, whether the
+// frame was cached, a job is running, the timer is gated on, and whether any
+// error bit is set (e.g. ERR_USB_BADFRAME when a command id is unknown).
+
+static void st_hex8(char *p, uint32_t v)
+{
+    for (int i = 7; i >= 0; i--)
+    {
+        uint8_t n = (uint8_t)((v >> (i * 4)) & 0xFu);
+        p[7 - i] = (n < 10u) ? (char)('0' + n) : (char)('A' + n - 10);
+    }
+}
+
+static void st_put(char *buf, uint16_t max, uint16_t *n, char c)
+{
+    if (*n + 1u < max)
+        buf[(*n)++] = c;
+}
+
+// append an unsigned decimal number (1-2 digits, up to 99)
+static void st_put_u16(char *buf, uint16_t max, uint16_t *n, uint16_t v)
+{
+    if (v >= 100u)
+        v = 99u;
+    if (v >= 10u)
+        st_put(buf, max, n, (char)('0' + (v / 10u)));
+    st_put(buf, max, n, (char)('0' + (v % 10u)));
+}
+
+uint16_t can_format_status(char *buf, uint16_t max)
+{
+    if (buf == NULL || max < 2)
+        return 0;
+
+    char err[9];
+    st_hex8(err, error_reg());
+    err[8] = 0;
+
+    static const char hdr[] = "ST:bus=";
+    static const char mode_s[] = " mode=S";
+    static const char mode_l[] = " mode=L";
+    static const char j0[] = " job=0";
+    static const char j1[] = " job=1";
+    static const char t0[] = " tmr=0";
+    static const char t1[] = " tmr=1";
+    static const char c0[] = " cur=0";
+    static const char c1[] = " cur=1";
+    static const char pend[] = " pend=";
+    static const char act[] = " act=";
+    static const char errt[] = " err=";
+
+    uint16_t n = 0;
+    uint16_t i;
+    const char *q;
+
+    for (i = 0; hdr[i]; i++) st_put(buf, max, &n, hdr[i]);
+    st_put(buf, max, &n, (char)('0' + (bus_state == ON_BUS ? 1 : 0)));
+
+    q = (can_send_mode == CAN_SEND_MODE_FRAMELIST) ? mode_l : mode_s;
+    for (i = 0; q[i]; i++) st_put(buf, max, &n, q[i]);
+
+    q = tx_job_active ? j1 : j0;
+    for (i = 0; q[i]; i++) st_put(buf, max, &n, q[i]);
+
+    q = can_timer_is_enabled() ? t1 : t0;
+    for (i = 0; q[i]; i++) st_put(buf, max, &n, q[i]);
+
+    q = cur_tx_valid ? c1 : c0;
+    for (i = 0; q[i]; i++) st_put(buf, max, &n, q[i]);
+
+    for (i = 0; pend[i]; i++) st_put(buf, max, &n, pend[i]);
+    st_put_u16(buf, max, &n, (uint16_t)can_frame_list_pending_count());
+
+    for (i = 0; act[i]; i++) st_put(buf, max, &n, act[i]);
+    st_put_u16(buf, max, &n, (uint16_t)can_frame_list_active_count());
+
+    for (i = 0; errt[i]; i++) st_put(buf, max, &n, errt[i]);
+    for (i = 0; i < 8 && n + 1u < max; i++)
+        buf[n++] = err[i];
+
+    st_put(buf, max, &n, '\r');
+    buf[n] = 0;
+    return n;
 }

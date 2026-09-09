@@ -19,7 +19,9 @@
 #include "n32h47x_48x_conf.h"
 #include "usb_proto.h"
 #include "can.h"
+#include "can_timer.h"
 #include "error.h"
+#include "usbd_cdc_if.h"
 
 
 // Parser states
@@ -105,6 +107,42 @@ static void proto_cmd_dispatch(void)
             if (can_apply_bitrate_hz(value) != 0)
                 error_assert(ERR_USB_BADFRAME);   // unsupported rate
             break;
+
+        case USB_PROTO_CMD_ID_TX_START:
+        {
+            can_tx_trigger_t trig = (value & 1u)
+                                        ? CAN_TX_TRIGGER_CONTINUOUS
+                                        : CAN_TX_TRIGGER_SINGLE;
+            if (can_tx_start(trig) == 0)
+            {
+                // Continuous mode, and any list-mode job (even a single
+                // pass), is driven by the periodic timer pump -> enable it.
+                if (trig == CAN_TX_TRIGGER_CONTINUOUS ||
+                    can_get_send_mode() == CAN_SEND_MODE_FRAMELIST)
+                {
+                    can_timer_enable();
+                }
+            }
+            else
+            {
+                error_assert(ERR_USB_BADFRAME);   // nothing cached to send
+            }
+            break;
+        }
+
+        case USB_PROTO_CMD_ID_TX_STOP:
+            can_tx_stop();        // also disables the periodic timer
+            can_timer_disable();  // belt & braces
+            break;
+
+        case USB_PROTO_CMD_ID_GET_STATUS:
+        {
+            char st[64];
+            uint16_t n = can_format_status(st, (uint16_t)sizeof(st));
+            if (n > 0)
+                cdc_transmit((uint8_t *)st, n);
+            break;
+        }
 
         default:
             error_assert(ERR_USB_BADFRAME);

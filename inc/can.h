@@ -156,5 +156,8 @@ int32_t can_tx_start(can_tx_trigger_t trigger);
 void can_tx_stop(void);
 // True while a periodic TX job is running.
 uint8_t can_tx_job_running(void);
+// Format a one-line ASCII status report (host GET_STATUS command).
+// Writes at most max-1 bytes + NUL; returns the length.
+uint16_t can_format_status(char *buf, uint16_t max);
 
 #endif // _CAN_H
