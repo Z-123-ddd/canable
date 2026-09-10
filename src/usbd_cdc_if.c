@@ -4,8 +4,8 @@
  * 
  * Implements a simple USB CDC ACM device for the CANable2.
  * Data flow:
- *   Host → USB OUT EP1 → rx_buffer → cdc_process() → SLCAN parser → CAN TX
- *   CAN RX → SLCAN frame → cdc_transmit() → tx_buffer → USB IN EP2 → Host
+ *   Host → USB OUT EP1 → rx_buffer → cdc_process() → usb_proto parser → CAN TX
+ *   CAN RX → usb_proto binary frame → cdc_transmit() → tx_buffer → USB IN EP2 → Host
  */
 
 #include "n32h47x_48x.h"

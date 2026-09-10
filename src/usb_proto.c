@@ -89,6 +89,80 @@ static uint32_t crc_compute(uint16_t id_n, uint8_t ctrl)
 }
 
 
+// Encode a received CAN/FD frame (bus -> USB) into the same binary layout the
+// host uses to send data: AA AB | ID | CTRL | DATA | CRC. The ID field width
+// follows the ACTUAL received frame type (standard 2B / extended 4B) so the
+// report is independent of the host's send-side id-format config.
+int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
+                            const FDCAN_RxHeaderType *hdr, const uint8_t *data)
+{
+    if (out == NULL || hdr == NULL)
+        return -1;
+
+    uint8_t fd     = (hdr->FDFormat == FDCAN_FD_CAN) ? 1u : 0u;
+    uint8_t ext    = (hdr->IdType == FDCAN_EXTENDED_ID) ? 1u : 0u;
+    uint8_t remote = (!fd && hdr->RxFrameType == FDCAN_REMOTE_FRAME) ? 1u : 0u;
+    uint8_t id_bytes = ext ? 4u : 2u;
+
+    int8_t nbytes = hal_dlc_code_to_bytes(hdr->DataLength);
+    if (nbytes < 0)
+        return -1;
+    if (remote)
+        nbytes = 0;   // classic remote frames carry no data bytes
+
+    // Raw DLC nibble (0..15): the HAL DLC code keeps it in the high nibble.
+    uint8_t dlc = (uint8_t)((hdr->DataLength >> 16) & USB_PROTO_CTRL_DLC_M);
+
+    uint8_t ctrl = 0;
+    if (fd)                                             ctrl |= USB_PROTO_CTRL_FDF;
+    if (fd && hdr->BitRateSwitch == FDCAN_BRS_ON)       ctrl |= USB_PROTO_CTRL_BRS;
+    if (remote)                                         ctrl |= USB_PROTO_CTRL_RTR;
+    ctrl |= dlc;
+
+    uint8_t crc_bytes = fd ? 3u : 2u;
+    uint16_t total = (uint16_t)(2u + id_bytes + 1u + (uint16_t)nbytes + crc_bytes);
+    if (total > max)
+        return -1;
+
+    uint16_t i = 0;
+    out[i++] = USB_PROTO_SOF1;       // 0xAA
+    out[i++] = USB_PROTO_DATA_SOF2;  // 0xAB
+
+    // ID, big-endian
+    if (ext) {
+        out[i++] = (uint8_t)(hdr->ID >> 24);
+        out[i++] = (uint8_t)(hdr->ID >> 16);
+    }
+    out[i++] = (uint8_t)(hdr->ID >> 8);
+    out[i++] = (uint8_t)(hdr->ID);
+
+    out[i++] = ctrl;
+
+    for (int8_t j = 0; j < nbytes; j++)
+        out[i++] = data[j];
+
+    // Transport CRC over ID + CTRL + DATA (skip the 2-byte header)
+    uint16_t cov = (uint16_t)(id_bytes + 1u + (uint16_t)nbytes);
+    uint32_t crc;
+    if (fd)
+        crc = (nbytes <= 16)
+                  ? crc_msb_width(&out[2], cov, 17, USB_PROTO_CRC17_POLY)
+                  : crc_msb_width(&out[2], cov, 21, USB_PROTO_CRC21_POLY);
+    else
+        crc = crc_msb_width(&out[2], cov, 15, USB_PROTO_CRC15_POLY);
+
+    if (fd) {
+        out[i++] = (uint8_t)(crc >> 16);
+        out[i++] = (uint8_t)(crc >> 8);
+        out[i++] = (uint8_t)(crc);
+    } else {
+        out[i++] = (uint8_t)(crc >> 8);
+        out[i++] = (uint8_t)(crc);
+    }
+    return (int32_t)i;
+}
+
+
 // ---------------------------------------------------------------------------
 // Frame dispatch
 // ---------------------------------------------------------------------------

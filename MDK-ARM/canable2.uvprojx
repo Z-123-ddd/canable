@@ -425,11 +425,6 @@
               <FilePath>..\src\usb_proto.c</FilePath>
             </File>
             <File>
-              <FileName>slcan.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\src\slcan.c</FilePath>
-            </File>
-            <File>
               <FileName>led.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\src\led.c</FilePath>

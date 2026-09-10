@@ -29,6 +29,7 @@
 #define _USB_PROTO_H
 
 #include <stdint.h>
+#include "n32h47x_48x.h"
 
 
 // ---- Frame headers ----
@@ -102,5 +103,15 @@
 void usb_proto_feed(uint8_t byte);
 // Drop any partially received frame and resynchronise on the next header
 void usb_proto_reset(void);
+
+// Encode one RECEIVED CAN/FD frame (bus -> USB) into the SAME binary layout
+// the host uses to send data:  AA AB | ID | CTRL | DATA | CRC.
+//   ID    : 2 bytes (standard) or 4 bytes (extended), big-endian, taken from
+//           the ACTUAL received frame type (not the host id-format config)
+//   CTRL  : bit7 FDF, bit6 BRS(FD), bit5 RTR(classic), bits3..0 DLC code
+//   CRC   : classic 2 bytes (CRC-15) / FD 3 bytes (CRC-17 or CRC-21)
+// Returns the total frame length (>0), or -1 on error / buffer too small.
+int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
+                            const FDCAN_RxHeaderType *hdr, const uint8_t *data);
 
 #endif /* _USB_PROTO_H */

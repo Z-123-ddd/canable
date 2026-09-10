@@ -2,10 +2,10 @@
  * @file    main.c
  * @brief   CANable2 firmware main entry point (N32H473 port)
  *
- * USB-to-CAN bridge firmware implementing slcan protocol.
- *   - Receives slcan ASCII commands via USB CDC
+ * USB-to-CAN bridge firmware (binary USB protocol).
+ *   - Receives binary command/data frames via USB CDC
  *   - Parses and transmits CAN/CANFD frames
- *   - Receives CAN/CANFD frames and sends them as slcan ASCII via USB
+ *   - Receives CAN/CANFD frames and reports them as binary frames via USB
  */
 
 #include "n32h47x_48x.h"
@@ -13,7 +13,7 @@
 #include "system.h"
 #include "can.h"
 #include "can_timer.h"
-#include "slcan.h"
+#include "usb_proto.h"
 #include "led.h"
 #include "error.h"
 #include "printf.h"
@@ -42,7 +42,7 @@ int main(void)
     // Storage for CAN RX message
     FDCAN_RxHeaderType rx_msg_header;
     uint8_t rx_msg_data[64] = {0};
-    uint8_t msg_buf[SLCAN_MTU];
+    uint8_t msg_buf[USB_PROTO_MAX_FRAME];
 
     while (1)
     {
@@ -55,8 +55,8 @@ int main(void)
             // Read CAN frame from software RX queue
             if (can_rx(&rx_msg_header, rx_msg_data) == SUCCESS)
             {
-                // Parse frame into SLCAN ASCII format
-                int32_t msg_len = slcan_parse_frame(msg_buf, &rx_msg_header, rx_msg_data);
+                // Encode frame into the binary RX report format (AA AB | ID | CTRL | DATA | CRC)
+                int32_t msg_len = usb_proto_encode_rx(msg_buf, sizeof(msg_buf), &rx_msg_header, rx_msg_data);
 
                 // Transmit via USB CDC
                 if (msg_len > 0)
