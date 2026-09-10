@@ -27,6 +27,8 @@ public:
     virtual QString name() const = 0;
     // 发送原始协议字节
     virtual void send(const QByteArray &bytes) = 0;
+    // 等待发送缓冲排空（默认无操作；串口实现会阻塞至写完）
+    virtual void flush() {}
 
 signals:
     void opened(const QString &name);

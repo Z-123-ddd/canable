@@ -51,6 +51,14 @@ void SerialLink::send(const QByteArray &bytes)
     emit rawTx(bytes);
 }
 
+void SerialLink::flush()
+{
+    if (!m_port.isOpen())
+        return;
+    m_port.flush();
+    m_port.waitForBytesWritten(1000);   // 阻塞至内部缓冲写出（最多 1s）
+}
+
 void SerialLink::onReadyRead()
 {
     const QByteArray data = m_port.readAll();

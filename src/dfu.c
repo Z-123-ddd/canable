@@ -5,19 +5,25 @@
  * Ported from the ODrive N32 firmware (proj1, MotorControl/main.cpp).
  *
  * The N32H47x factory bootloader is located in the system-memory area and
- * supports DFU download over USB. Jumping to it from the running
- * application requires:
- *   1. disabling the flash i-cache (it is cleaned before leaving),
+ * supports DFU download over USB. Jumping to it from the running application
+ * requires:
+ *   1. disabling the flash i-cache,
  *   2. probing the bootloader version (Get_NVR in system memory),
- *   3. building a 128-word vector table at the TOP of SRAM that redirects
- *      the interrupts used by the bootloader (SysTick / USART3 / USB FS)
- *      into the boot code (0x1FFF2xxx),
+ *   3. building a 128-word vector table at the TOP of SRAM that redirects the
+ *      interrupts used by the bootloader (SysTick / USART3 / USB FS) into the
+ *      boot code (0x1FFF2xxx),
  *   4. disabling interrupts, re-arming the IWDG and switching the system
  *      clock back to HSI (the bootloader starts from reset-state clocks),
  *   5. setting the stack pointer / VTOR to the boot image and jumping.
  *
- * NOTE: the ODrive source used a 144KB SRAM size (0x24000); this chip
- * (N32H473, 128KB SRAM) places the vector table at 0x2001FE00 instead.
+ * SRAM top depends on the part's density:
+ *   ODrive reference board: 144 KB (112 KB SRAM + 32 KB CCM) -> 0x20023E00
+ *   THIS board  N32H473CE : 192 KB (160 KB SRAM + 32 KB CCM) -> 0x2002FE00
+ * The CCM bank sits contiguously above the main SRAM (Nations DFP: IRAM1 =
+ * 0x20000000 length 0x30000 for N32H473CE), and 0x20023C00 is well below this
+ * part's SRAM top, so both install points are valid RAM here. The address the
+ * boot ROM actually reads is not documented per density, so an identical table
+ * is installed at every candidate top and VTOR aims at the largest.
  */
 
 #include "n32h47x_48x.h"
@@ -26,7 +32,17 @@
 
 /* ---- Constants from the N32 system bootloader (same chip family) ---- */
 #define SRAM_VECTOR_WORD_SIZE   (128)
-#define SRAM_VECTOR_ADDR        (0x2001FE00u)   /* top of 128KB SRAM - 0x200 */
+
+/* Candidate SRAM tops (address = top - 0x200), highest last. */
+static const uint32_t SRAM_VECTOR_ADDRS[] = {
+    0x20023E00u,   /* top of 144 KB (112 KB SRAM + 32 KB CCM, ODrive reference) */
+    0x2002FE00u,   /* top of 192 KB (160 KB SRAM + 32 KB CCM, N32H473CE)      */
+};
+#define SRAM_VECTOR_COUNT \
+    (sizeof(SRAM_VECTOR_ADDRS) / sizeof(SRAM_VECTOR_ADDRS[0]))
+
+/* VTOR handed to the boot ROM: the largest candidate table. */
+static const uint32_t SRAM_VECTOR_TARGET = 0x2002FE00u;
 
 static uint32_t BootAddr  = 0x1FFF01A1u;        /* bootloader entry */
 static uint32_t SPAddr    = 0x200024A8u;        /* boot stack (V1.0)  */
@@ -87,6 +103,25 @@ static ErrorStatus dfu_set_sysclock_to_hsi(void)
 
 
 /**
+ * @brief  Install the 128-word bootloader vector table at one SRAM address.
+ *         Redirects SysTick / USART3 / USB FS into the boot code.
+ */
+static void dfu_install_vector_table(uint32_t addr,
+                                     uint32_t systick, uint32_t usart3, uint32_t usbfs)
+{
+    uint32_t i;
+    uint32_t *pVec = (uint32_t *)addr;
+
+    for (i = 0; i < SRAM_VECTOR_WORD_SIZE; i++)
+        pVec[i] = 0;
+
+    pVec[SysTick_IRQn + 16]   = systick;
+    pVec[USART3_IRQn + 16]    = usart3;
+    pVec[USB_FS_LP_IRQn + 16] = usbfs;
+}
+
+
+/**
  * @brief  Jump into the N32 DFU bootloader (never returns on success).
  */
 static void dfu_jump_to_boot(void)
@@ -94,12 +129,7 @@ static void dfu_jump_to_boot(void)
     uint8_t value1[8] = {0x00};
     uint8_t value2 = 8;
     uint32_t i;
-    uint32_t *pVec;
-
-    /* Build an empty vector table at the top of SRAM */
-    pVec = (uint32_t *)SRAM_VECTOR_ADDR;
-    for (i = 0; i < SRAM_VECTOR_WORD_SIZE; i++)
-        pVec[i] = 0;
+    uint32_t systick, usart3, usbfs;
 
     /* Disable / reset the flash instruction cache */
     FLASH_iCacheCmd(FLASH_iCache_DIS);
@@ -111,17 +141,21 @@ static void dfu_jump_to_boot(void)
 
     if ((value1[0] & 0xFFu) == 0x11u)   /* BOOT V1.1 */
     {
-        SPAddr = 0x200024C0u;
-        pVec[SysTick_IRQn + 16]  = 0x1FFF2F15u;
-        pVec[USART3_IRQn + 16]   = 0x1FFF2F95u;
-        pVec[USB_FS_LP_IRQn + 16]= 0x1FFF3095u;
+        SPAddr  = 0x200024C0u;
+        systick = 0x1FFF2F15u;
+        usart3  = 0x1FFF2F95u;
+        usbfs   = 0x1FFF3095u;
     }
     else                              /* BOOT V1.0 */
     {
-        pVec[SysTick_IRQn + 16]  = 0x1FFF2D31u;
-        pVec[USART3_IRQn + 16]   = 0x1FFF2DB1u;
-        pVec[USB_FS_LP_IRQn + 16]= 0x1FFF2EB1u;
+        systick = 0x1FFF2D31u;
+        usart3  = 0x1FFF2DB1u;
+        usbfs   = 0x1FFF2EB1u;
     }
+
+    /* Install the vector table at every candidate SRAM top */
+    for (i = 0; i < SRAM_VECTOR_COUNT; i++)
+        dfu_install_vector_table(SRAM_VECTOR_ADDRS[i], systick, usart3, usbfs);
 
     /* Disable all interrupts */
     __disable_irq();
@@ -144,7 +178,7 @@ static void dfu_jump_to_boot(void)
     __enable_irq();
 
     /* Point the vector table at the SRAM copy and jump */
-    SCB->VTOR = SRAM_VECTOR_ADDR;
+    SCB->VTOR = SRAM_VECTOR_TARGET;
     jump_boot();
 }
 

@@ -23,6 +23,7 @@ public:
     bool isOpen() const override { return m_port.isOpen(); }
     QString name() const override { return m_port.portName(); }
     void send(const QByteArray &bytes) override;
+    void flush() override;
 
 private slots:
     void onReadyRead();

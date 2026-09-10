@@ -822,9 +822,10 @@ void MainWindow::onQueryStatus()
 // ---------------------------------------------------------------------------
 void MainWindow::onUpdateFirmware()
 {
-    // 1) 若串口已打开，发 ENTER_DFU 命令让 MCU 进入 DFU，然后关闭串口
+    // 1) 若已打开，发 ENTER_DFU 命令让 MCU 进入 DFU，然后关闭连接
     if (m_link->isOpen()) {
         sendCommand(proto::CMD_ENTER_DFU, 0, QStringLiteral("进入 DFU"));
+        m_link->flush();   // 确保命令真正写出后再关闭（串口写是异步的）
         logInfo(QStringLiteral("已发送进入 DFU 命令，等待设备重新枚举..."));
         m_link->close();
     }
