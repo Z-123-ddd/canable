@@ -61,6 +61,38 @@ system and add the `bin` folder to your PATH.
 
 Your Linux distribution may also have a prebuilt package for `arm-none-eabi-gcc`, check your distro's repositories to see if a build exists. Simply compile by running `make`. 
 
+## Building with Keil MDK-ARM (uVision)
+
+An Arm Compiler 6 (armclang) uVision project is provided at
+`MDK-ARM/canable2.uvprojx` (device N32H473CE, MicroLIB). Open it in Keil and
+Build (F7), or build from the command line:
+
+    UV4.exe -j0 -b MDK-ARM\canable2.uvprojx -o build.log
+
+Outputs go to `MDK-ARM/Objects/` (`canable2.axf`, `canable2.bin`,
+`canable2.hex`); an `AfterMake` step runs `fromelf --bin` to produce the `.bin`.
+
+### Warning policy (Keil)
+
+The Keil project is pinned to the same warning baseline as the GCC build
+(`-Wall`), so both builds report the same diagnostics:
+
+- `Cads/wLevel = 0` -- Keil does NOT inject the extra `-Wextra` /
+  `-Wconversion` / `-Wpadded` families.
+- `Cads/MiscControls = -include git_version.h -Wall` -- enables `-Wall`
+  explicitly, and force-includes `git_version.h` (which supplies the
+  `GIT_VERSION` / `GIT_REMOTE` string macros for `main.c`; uVision's Define
+  field strips embedded quotes, so a force-include is used instead).
+- `src/` must stay `-Wall`-clean. It currently is (one unused variable in
+  `usb_pwr.c` was removed for this).
+- A vendor warning that survives `-Wall` is silenced only on that file, via its
+  `FileOption` -- e.g. `Drivers/.../n32h47x_48x_rtc.c` sets
+  `-Wno-unused-variable` (unused `temp`).
+
+Do NOT raise `wLevel` back to 2 (the Keil "All Warnings" preset): it turns on
+`-Wextra` / `-Wconversion` / `-Wpadded` / `-Wcovered-switch-default` etc. across
+the vendored `Drivers/`, producing ~199 warnings.
+
 ## Flashing with the Bootloader
 
 Plug in your CANable2 while pressing down the BOOT button. The blue LED should be dimly illuminated. Next, type `make flash` and your CANable will be updated to the latest firwmare. Unplug/replug the device after moving the boot jumper back, and your CANable will be up and running.

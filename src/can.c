@@ -236,7 +236,96 @@ void can_init(void)
 }
 
 
-// Start the CAN peripheral
+// ---------------------------------------------------------------------------
+// Low-level FDCAN hardware bring-up / teardown.
+// These touch ONLY the peripheral and its interrupts - never the software
+// caches - so they can be reused to hot-reconfigure the bitrate without
+// dropping a queued TX frame or a running job (see can_apply_bitrate_hz()).
+// ---------------------------------------------------------------------------
+
+// Configure the FDCAN peripheral from the current bit-timing fields and start
+// it: init + accept-all filter + timestamp + TX delay compensation + the
+// RX FIFO0 / bus-off interrupts and their NVIC line.
+static void can_hw_start(void)
+{
+    // Apply current bitrate settings
+    can_handle.Prescaler = prescaler;
+    can_handle.SyncJumpWidth = sync_jump_width;
+    can_handle.TimeSeg1 = time_seg1;
+    can_handle.TimeSeg2 = time_seg2;
+    can_handle.DataPrescaler = data_prescaler;
+    can_handle.DataSyncJumpWidth = data_sync_jump_width;
+    can_handle.DataTimeSeg1 = data_time_seg1;
+    can_handle.DataTimeSeg2 = data_time_seg2;
+
+    // Initialize FDCAN
+    FDCAN_Init(FDCAN1, &can_handle);
+
+    // Global filter: accept all standard+extended frames into RX FIFO0
+    FDCAN_ConfigGlobalFilter(FDCAN1,
+        FDCAN_ACCEPT_STD_IN_RX_FIFO0, FDCAN_ACCEPT_EXT_IN_RX_FIFO0,
+        FDCAN_FILTER_STD_REMOTE, FDCAN_FILTER_EXT_REMOTE);
+
+    // Configure timestamp
+    FDCAN_ConfigTSPrescaler(FDCAN1, FDCAN_TIMESTAMP_PRESC_16);
+    FDCAN_Config_TS(FDCAN1, FDCAN_TIMESTAMP_DISABLE);
+
+    // Configure Tx delay compensation for CAN FD
+    FDCAN_ConfigTxDelayCompensation(FDCAN1, can_handle.DataTimeSeg1, can_handle.DataTimeSeg1);
+    FDCAN_EnableTxDelayCompensation(FDCAN1);
+
+    // Start FDCAN
+    FDCAN_Start(FDCAN1);
+
+    // Enable FDCAN1 interrupts on line 0:
+    //   - Rx FIFO 0 new message -> ISR drains HW FIFO into software RX queue
+    //   - Bus-Off             -> ISR restarts the CAN controller automatically
+    FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_INTERRUPT_LINE0);
+    FDCAN_ActivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_TX_BUFFER0);
+    FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_INTERRUPT_LINE0);
+    FDCAN_ActivateInt(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_TX_BUFFER0);
+
+    NVIC_InitType nvic;
+    nvic.NVIC_IRQChannel = FDCAN1_INT0_IRQn;
+    nvic.NVIC_IRQChannelPreemptionPriority = 7; // below USB FS LP (6) / SysTick (0)
+    nvic.NVIC_IRQChannelSubPriority = 0;
+    nvic.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&nvic);
+
+    bus_state = ON_BUS;
+    led_blue_on();
+}
+
+// Deactivate FDCAN1 interrupts, stop and de-init the peripheral. Marks the
+// bus OFF first so the periodic pump / can_tx_hw() bail out immediately.
+static void can_hw_stop(void)
+{
+    bus_state = OFF_BUS;
+
+    FDCAN_DeactivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE | FDCAN_INT_BUS_OFF);
+    FDCAN_Stop(FDCAN1);
+    FDCAN_DeInit(FDCAN1);
+}
+
+// Drop the software-side queues / caches: RX queue, the single-frame TX cache,
+// any running TX job and the frame lists. Used only on a clean open/close -
+// a bitrate change must NOT call this (queued frames/jobs have to survive).
+static void can_clear_software_state(void)
+{
+    rxqueue.head = 0;
+    rxqueue.tail = 0;
+    cur_tx_valid = 0;
+
+    __disable_irq();
+    tx_job_active = 0;
+    tx_job_single_pass = 0;
+    tx_list_pos = 0;
+    __enable_irq();
+
+    can_frame_list_init();
+}
+
+// Open the CAN channel: clean software state + hardware bring-up.
 void can_enable(void)
 {
     if (bus_state == OFF_BUS)
@@ -244,86 +333,21 @@ void can_enable(void)
         // De-init first to clear state
         FDCAN_DeInit(FDCAN1);
 
-        // Reset state (drop stale frames / stop any TX job)
-        rxqueue.head = 0;
-        rxqueue.tail = 0;
-        cur_tx_valid = 0;
-        tx_job_active = 0;
-        tx_job_single_pass = 0;
-        tx_list_pos = 0;
-        can_frame_list_init();
+        // Fresh session: drop any stale software state
+        can_clear_software_state();
 
-        // Apply current bitrate settings
-        can_handle.Prescaler = prescaler;
-        can_handle.SyncJumpWidth = sync_jump_width;
-        can_handle.TimeSeg1 = time_seg1;
-        can_handle.TimeSeg2 = time_seg2;
-        can_handle.DataPrescaler = data_prescaler;
-        can_handle.DataSyncJumpWidth = data_sync_jump_width;
-        can_handle.DataTimeSeg1 = data_time_seg1;
-        can_handle.DataTimeSeg2 = data_time_seg2;
-
-        // Initialize FDCAN
-        FDCAN_Init(FDCAN1, &can_handle);
-
-        // Global filter: accept all standard+extended frames into RX FIFO0
-        FDCAN_ConfigGlobalFilter(FDCAN1,
-            FDCAN_ACCEPT_STD_IN_RX_FIFO0, FDCAN_ACCEPT_EXT_IN_RX_FIFO0,
-            FDCAN_FILTER_STD_REMOTE, FDCAN_FILTER_EXT_REMOTE);
-
-        // Configure timestamp
-        FDCAN_ConfigTSPrescaler(FDCAN1, FDCAN_TIMESTAMP_PRESC_16);
-        FDCAN_Config_TS(FDCAN1, FDCAN_TIMESTAMP_DISABLE);
-
-        // Configure Tx delay compensation for CAN FD
-        FDCAN_ConfigTxDelayCompensation(FDCAN1, can_handle.DataTimeSeg1, can_handle.DataTimeSeg1);
-        FDCAN_EnableTxDelayCompensation(FDCAN1);
-
-        // Start FDCAN
-        FDCAN_Start(FDCAN1);
-
-        // Enable FDCAN1 interrupts on line 0:
-        //   - Rx FIFO 0 new message -> ISR drains HW FIFO into software RX queue
-        //   - Bus-Off             -> ISR restarts the CAN controller automatically
-        FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_INTERRUPT_LINE0);
-        FDCAN_ActivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_TX_BUFFER0);
-        FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_INTERRUPT_LINE0);
-        FDCAN_ActivateInt(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_TX_BUFFER0);
-
-        NVIC_InitType nvic;
-        nvic.NVIC_IRQChannel = FDCAN1_INT0_IRQn;
-        nvic.NVIC_IRQChannelPreemptionPriority = 7; // below USB FS LP (6) / SysTick (0)
-        nvic.NVIC_IRQChannelSubPriority = 0;
-        nvic.NVIC_IRQChannelCmd = ENABLE;
-        NVIC_Init(&nvic);
-
-        bus_state = ON_BUS;
-        led_blue_on();
+        // Configure and start the peripheral
+        can_hw_start();
     }
 }
 
-
-// Disable the CAN peripheral
+// Close the CAN channel: stop the hardware, then drop the software state.
 void can_disable(void)
 {
     if (bus_state == ON_BUS)
     {
-        // Disable FDCAN1 interrupts first so no ISR can fire while stopping
-        FDCAN_DeactivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE | FDCAN_INT_BUS_OFF);
-
-        FDCAN_Stop(FDCAN1);
-        FDCAN_DeInit(FDCAN1);
-
-        // Drop any frames still queued / stop any TX job
-        rxqueue.head = 0;
-        rxqueue.tail = 0;
-        cur_tx_valid = 0;
-        tx_job_active = 0;
-        tx_job_single_pass = 0;
-        tx_list_pos = 0;
-        can_frame_list_init();
-
-        bus_state = OFF_BUS;
+        can_hw_stop();
+        can_clear_software_state();
         led_green_on();
     }
 }
@@ -468,9 +492,15 @@ int32_t can_apply_bitrate_hz(uint32_t hz)
 
     if (bus_state == ON_BUS)
     {
-        can_disable();          // stop & drop queues (set_bitrate is a no-op while ON_BUS)
+        // Hot-reconfigure the peripheral for the new nominal bitrate WITHOUT
+        // dropping the software cache: a frame queued before the rate change
+        // (and any running job / frame list) must survive so the host can
+        // still send it. can_hw_stop() flips the bus OFF (which gates the
+        // periodic pump) and can_hw_start() brings it back up; neither touches
+        // the TX caches, so an active continuous job simply resumes.
+        can_hw_stop();
         can_set_bitrate(match);
-        can_enable();           // re-init, re-start, re-enable interrupts
+        can_hw_start();
     }
     else
     {

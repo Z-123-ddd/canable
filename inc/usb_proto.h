@@ -55,6 +55,20 @@
 #define USB_PROTO_CMD_ID_TX_STOP      3
 #define USB_PROTO_CMD_ID_GET_STATUS  4
 #define USB_PROTO_CMD_ID_ENTER_DFU   5
+//   id 6: set the periodic send interval. value = interval in ms, allowed
+//         range 1..1000; out-of-range values are refused (ERR_USB_BADFRAME).
+#define USB_PROTO_CMD_ID_SET_INTERVAL 6
+//   id 7: select the send mode. value = 0 single frame / 1 frame list;
+//         other values are refused (ERR_USB_BADFRAME).
+#define USB_PROTO_CMD_ID_SET_MODE     7
+
+// Allowed range (ms) for the SET_INTERVAL command value.
+#define USB_PROTO_TX_INTERVAL_MIN_MS  1U
+#define USB_PROTO_TX_INTERVAL_MAX_MS  1000U
+
+// SET_MODE command values.
+#define USB_PROTO_MODE_SINGLE         0U
+#define USB_PROTO_MODE_FRAMELIST      1U
 
 
 // ---- Data frames (AA AB) ----

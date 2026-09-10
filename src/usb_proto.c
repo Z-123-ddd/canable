@@ -109,6 +109,28 @@ static void proto_cmd_dispatch(void)
                 error_assert(ERR_USB_BADFRAME);   // unsupported rate
             break;
 
+        case USB_PROTO_CMD_ID_SET_INTERVAL:
+            // value = desired periodic send interval in ms (1..1000). Reject
+            // out-of-range values like an unsupported bitrate; the timer
+            // reload takes effect on the next tick and does not disturb any
+            // queued frame or running job.
+            if (value < USB_PROTO_TX_INTERVAL_MIN_MS ||
+                value > USB_PROTO_TX_INTERVAL_MAX_MS)
+                error_assert(ERR_USB_BADFRAME);
+            else
+                can_timer_set_period_ms(value);
+            break;
+
+        case USB_PROTO_CMD_ID_SET_MODE:
+            // value = 0 single frame / 1 frame list. Anything else is refused.
+            if (value == USB_PROTO_MODE_SINGLE)
+                can_set_send_mode(CAN_SEND_MODE_SINGLE);
+            else if (value == USB_PROTO_MODE_FRAMELIST)
+                can_set_send_mode(CAN_SEND_MODE_FRAMELIST);
+            else
+                error_assert(ERR_USB_BADFRAME);
+            break;
+
         case USB_PROTO_CMD_ID_TX_START:
         {
             can_tx_trigger_t trig = (value & 1u)

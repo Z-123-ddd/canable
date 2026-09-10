@@ -76,7 +76,6 @@ void Suspend(void)
 
 void Resume(RESUME_STATE eResumeSetVal)
 {
-    uint32_t i;
 
     if (eResumeSetVal != RESUME_ESOF)
         ResumeS.eState = eResumeSetVal;

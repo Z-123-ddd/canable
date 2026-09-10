@@ -39,11 +39,13 @@
 
 | CMD | 名称 | VALUE 含义 | MCU 行为 |
 |---|---|---|---|
-| `1` | SET_BITRATE | 目标波特率(Hz) | 设置仲裁段波特率；不支持的值置 `ERR_USB_BADFRAME`。总线开启时自动重启以立即生效（会清空缓存） |
+| `1` | SET_BITRATE | 目标波特率(Hz) | 设置仲裁段波特率；不支持的值置 `ERR_USB_BADFRAME`。总线开启时**热重配** FDCAN 以立即生效：**不清空发送缓存**——已入队的单帧缓存、帧列表、运行中的发送任务与接收队列均保留，可先发数据帧/设波特率再 `TX_START`（顺序无关） |
 | `2` | TX_START | `0`=单次 / `1`=连续 | 触发发送缓存的源（单帧或列表）。单次=发一遍即停；连续=按定时器间隔周期发送。连续或列表模式需开启定时器（内部处理）。无缓存可发则置 `ERR_USB_BADFRAME` |
 | `3` | TX_STOP | — | 停止当前发送任务并关闭定时器 |
 | `4` | GET_STATUS | — | MCU 回一行 ASCII 状态（见 §7），供联机确认解析结果 |
 | `5` | ENTER_DFU | — | 停发送与定时器 → 切换系统时钟至 HSI → 跳入出厂 DFU bootloader（`0x1FFF01A1`）。**成功不返回**，主机随后可用 N32 DFU 工具下载固件 |
+| `6` | SET_INTERVAL | 发送间隔(ms) | 设置周期发送间隔，范围 **1–1000 ms**（整数）；越界置 `ERR_USB_BADFRAME`。用于命令 2（连续/列表周期发送）的间隔；重载定时器不影响已入队帧或运行中的任务 |
+| `7` | SET_MODE | `0`=单帧 / `1`=列表 | 选择发送模式：`0` 单帧（每次数据帧覆盖单帧缓存）/ `1` 列表（数据帧 FIFO 追加到 pending，最多 20 帧）。其他值置 `ERR_USB_BADFRAME`。建议在发数据帧前设置 |
 
 ### 支持的波特率（命令 1，Hz）
 
@@ -116,12 +118,12 @@ ID 字节数由当前 **ID 格式配置**决定（默认标准 11-bit）：
 固件维护 **RAM 中的发送源缓存**，数据帧只写入缓存、**不会立即上总线**；实际发送由命令帧触发：
 
 - **单帧模式**（默认）：每次数据帧覆盖"最近一帧"缓存；`TX_START` 后按 SINGLE（发一次）/ CONTINUOUS（定时周期重发最近帧）发送。
-- **列表模式**：由 API 切换到 FRAMELIST 后，一串数据帧按 FIFO 追加到 **pending 缓存**（上限 20 帧，超出置 `ERR_FRAMELIST_FULL`）；`TX_START` 时：
+- **列表模式**：用命令 7（`SET_MODE`，value=1）切换到 FRAMELIST 后，一串数据帧按 FIFO 追加到 **pending 缓存**（上限 20 帧，超出置 `ERR_FRAMELIST_FULL`）；`TX_START` 时：
   - pending 非空 → 整体**替换**为新的播放列表（active）；
   - pending 为空（数据未变、仅发命令）→ **沿用上次播放列表**；
   - SINGLE = 列表按 FIFO 发一遍即停；CONTINUOUS = 按定时器间隔循环发整个列表。
 
-> ⚠️ 发送模式（SINGLE/FRAMELIST）、定时器周期、ID 格式当前**均只有预留 API**（`can_set_send_mode()` / `can_timer_set_period_ms()` / `can_set_id_format()`），尚无对应 USB 命令码；默认单帧 + 1ms 定时器。
+> 发送模式可用命令 7（`SET_MODE`）在运行时切换（默认单帧），定时器周期可用命令 6（`SET_INTERVAL`）设置（默认 1ms）。仅 ID 格式当前仍**只有预留 API**（`can_set_id_format()`），尚无 USB 命令码。
 
 **定时器发送**：周期发送由 GTIM1 驱动，一旦启动即从 RAM 取帧，**不依赖 USB 持续喂数据**（上位机只需发一次数据+一次 `TX_START`）。
 
@@ -213,6 +215,27 @@ CAN 接收帧仍以 **slcan ASCII** 格式上报（一行以 `\r` 结尾）：
 AA AA 04 00 00 00 00      → 回: ST:bus=1 mode=S job=0 tmr=0 cur=1 pend=0 act=0 err=00000000\r
 ```
 
+**设置周期发送间隔为 100ms（命令 6）**
+
+```
+AA AA 06 64 00 00 00      ; 100 = 0x64，小端
+```
+
+**切换为列表模式并发送一组帧（命令 7 + 数据帧 + 命令 2）**
+
+```
+AA AA 07 01 00 00 00      ; SET_MODE: 1 = 列表模式
+AA AB 00 01 08 FF FF FF FF FF FF FF FA 79 F1   ; 帧1  ID=1 数据 FF..FA
+AA AB 00 01 08 FF FF FF FF FF FF FF FB 3C 68   ; 帧2  FF..FB
+AA AB 00 01 08 FF FF FF FF FF FF FF FC 6F 95   ; 帧3  FF..FC
+AA AB 00 01 08 FF FF FF FF FF FF FF FD 2A 0C   ; 帧4  FF..FD
+AA AB 00 01 08 FF FF FF FF FF FF FF FE 21 3E   ; 帧5  FF..FE
+AA AB 00 01 08 FF FF FF FF FF FF FF FF 64 A7   ; 帧6  FF..FF
+AA AA 02 00 00 00 00      ; TX_START value=0 单次：列表按 FIFO 发一遍
+```
+
+> 回到单帧模式：`AA AA 07 00 00 00 00`。
+
 **进入 DFU**
 
 ```
@@ -226,8 +249,6 @@ AA AA 05 00 00 00 00
 | API | 作用 |
 |---|---|
 | `can_set_id_format()` / `can_get_id_format()` | 切换标准/扩展 ID 宽度（影响数据帧 ID 字节数） |
-| `can_set_send_mode()` / `can_get_send_mode()` | 切换单帧 / 列表发送模式 |
-| `can_timer_set_period_ms()` | 设周期发送间隔（≥1ms） |
 | `can_timer_enable()` / `can_timer_disable()` | 软件门控周期发送 |
 | `can_tx_start()/stop()/job_running()` | 直接触发/停止发送任务（命令 2/3 的内部实现） |
 

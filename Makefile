@@ -93,7 +93,7 @@ CFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 CFLAGS += -DGIT_REMOTE=\"$(GIT_REMOTE)\"
 
 # Default action: build the user application
-all: $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET).hex
+all: $(BUILD_DIR)/$(TARGET).axf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET).hex
 
 
 flash: all
@@ -163,6 +163,9 @@ $(BUILD_DIR)/$(TARGET).hex: $(BUILD_DIR)/$(TARGET).elf
 
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET).elf
 	$(OBJCOPY) -O binary $(BUILD_DIR)/$(TARGET).elf $@
+
+$(BUILD_DIR)/$(TARGET).axf: $(BUILD_DIR)/$(TARGET).elf
+	$(OBJCOPY) -O elf32-littlearm $(BUILD_DIR)/$(TARGET).elf $@
 
 $(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) $(HAL_LIB) $(USB_LIB)
 	$(CC) -o $@ $(CFLAGS) $(OBJECTS) \
