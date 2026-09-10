@@ -45,6 +45,28 @@ cmake --build build
 > libusb 路径需设备的驱动为 WinUSB/libusbK（可用 [Zadig](https://zadig.akeo.ie/) 安装）。
 > 装成 libusb 驱动后该设备不再有 COM 口，此时在「传输」里选 `USB(libusb)`。
 
+## 打包安装程序 (NSIS)
+
+需要 NSIS（默认 `D:\NSIS`）与 Qt 的 `windeployqt`（随 Qt 安装）。
+`package.sh` 一键完成：Release 构建 → `windeployqt` 收集 Qt 运行库 + 拷贝
+`libusb-1.0.dll` → `makensis` 生成安装程序。
+
+```bash
+source /d/Qt/qt-tools-env.sh
+cd host
+./package.sh
+# 产物: host/dist/CANable2-Host-Setup-<版本>.exe
+```
+
+- 安装程序默认装到 `D:\Programs\CANable2-Host`（可在向导里更改），带开始菜单与桌面
+  快捷方式、卸载程序与注册表卸载登记。
+- 卸载会删除安装目录、快捷方式与注册表项。
+
+要点：
+- `host/installer/canable2_host.nsi` 为 NSIS 脚本（UTF-8 **带 BOM**，简体中文界面）。
+- 可用 `/DAPPVER=`、`/DINSTALLDIR=`、`/DREQLEVEL=`（`admin`/`user`）、`/DDEPLOYDIR=`、
+  `/DOUTFILE=` 覆盖脚本变量，便于自定义版本或做免提权的安装验证。
+
 
 ## 协议速览
 - 命令帧 `AA AA | CMD | VALUE(4, LE)`
