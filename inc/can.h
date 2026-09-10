@@ -130,6 +130,19 @@ can_send_mode_t can_get_send_mode(void);
 // new rate takes effect immediately.
 int32_t can_apply_bitrate_hz(uint32_t hz);
 
+// ---- Auto bitrate scan (bus-error triggered) ----
+// Call every main-loop iteration. Watches the FDCAN error counters; when bus
+// error activity is seen while no frame is being received (traffic present
+// but the current nominal bitrate cannot decode it), it cycles through every
+// supported nominal rate. The first rate that yields a received frame is
+// locked and the scan stops. The lock is latched for the host.
+void can_scan_poll(void);
+// One-shot: returns the locked nominal bitrate (Hz) exactly once after a lock,
+// then -1. Consumed by the main loop to emit the AA AC report.
+int32_t can_scan_take_lock(void);
+// Current nominal bitrate (Hz).
+uint32_t can_get_bitrate_hz(void);
+
 // Convert a raw DLC code (0..15, incl. CAN FD codes) to an FDCAN HAL DLC code
 uint32_t can_dlc_code_to_hal_dlc(uint8_t dlc_code);
 

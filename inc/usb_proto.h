@@ -4,8 +4,9 @@
  *
  * Replaces the ASCII SLCAN receive path. Every host packet starts with a
  * two-byte header:
- *    AA AA  -> command frame
- *    AA AB  -> data frame (one CAN / CAN FD frame to transmit)
+ *    AA AA  -> command frame (host -> MCU)
+ *    AA AB  -> data frame (host -> MCU to transmit; also MCU -> host RX report)
+ *    AA AC  -> response / event frame (MCU -> host, e.g. bitrate lock)
  *
  * Command frame payload (5 bytes):
  *    byte0: cmd id (1 = set nominal bitrate)
@@ -34,8 +35,9 @@
 
 // ---- Frame headers ----
 #define USB_PROTO_SOF1         0xAA
-#define USB_PROTO_CMD_SOF2     0xAA   // command frame
-#define USB_PROTO_DATA_SOF2    0xAB   // data frame
+#define USB_PROTO_CMD_SOF2     0xAA   // command frame (host -> MCU)
+#define USB_PROTO_DATA_SOF2    0xAB   // data frame (host -> MCU, and MCU -> host RX report)
+#define USB_PROTO_RSP_SOF2     0xAC   // response / event frame (MCU -> host)
 
 
 // ---- Command frames (AA AA) ----
@@ -113,5 +115,14 @@ void usb_proto_reset(void);
 // Returns the total frame length (>0), or -1 on error / buffer too small.
 int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
                             const FDCAN_RxHeaderType *hdr, const uint8_t *data);
+
+// ---- Response / event frames (AA AC, MCU -> host) ----
+//   id 1: bitrate lock. Payload = the nominal bitrate in Hz as a 4-byte
+//         little-endian uint32. Sent once, when the auto-bitrate scan locks
+//         onto a rate that actually receives frames (see can_scan_poll()).
+#define USB_PROTO_RSP_ID_BITRATE_LOCK  1
+
+// Emit the "bitrate locked" response: AA AC 01 | hz[4] LE.
+void usb_proto_send_bitrate_lock(uint32_t hz);
 
 #endif /* _USB_PROTO_H */

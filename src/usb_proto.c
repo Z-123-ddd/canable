@@ -433,3 +433,19 @@ void usb_proto_reset(void)
     rxlen = 0;
     need = 0;
 }
+
+
+// Emit the "bitrate locked" response frame (MCU -> host): AA AC 01 | hz[4] LE.
+// Called (indirectly, via the main loop) when the auto-bitrate scan locks.
+void usb_proto_send_bitrate_lock(uint32_t hz)
+{
+    uint8_t b[7];
+    b[0] = USB_PROTO_SOF1;
+    b[1] = USB_PROTO_RSP_SOF2;
+    b[2] = USB_PROTO_RSP_ID_BITRATE_LOCK;
+    b[3] = (uint8_t)(hz);
+    b[4] = (uint8_t)(hz >> 8);
+    b[5] = (uint8_t)(hz >> 16);
+    b[6] = (uint8_t)(hz >> 24);
+    cdc_transmit(b, (uint16_t)sizeof(b));
+}

@@ -49,6 +49,14 @@ int main(void)
         led_process();
         cdc_process();
 
+        // Auto bitrate scan: cycle candidate rates while the bus shows error
+        // activity but no frame is being received; on lock, report it to the
+        // host as an AA AC response before the frames below.
+        can_scan_poll();
+        int32_t lock_hz = can_scan_take_lock();
+        if (lock_hz >= 0)
+            usb_proto_send_bitrate_lock((uint32_t)lock_hz);
+
         // Check for received CAN messages (software RX queue filled by FDCAN ISR)
         while (is_can_msg_pending(FDCAN_RX_FIFO0))
         {

@@ -58,6 +58,32 @@ static uint8_t tx_job_active = 0;          // 1 = a periodic job is being pumped
 static uint8_t tx_job_single_pass = 0;     // FRAMELIST: 1 = stop after one pass
 static uint16_t tx_list_pos = 0;           // FRAMELIST: FIFO cursor into active list
 
+// ---- Auto bitrate scan state ----
+#define CAN_SCAN_ERR_THRESHOLD   8u     // REC/TEC at/above this => bus trouble
+#define CAN_SCAN_WINDOW_MS       120u   // dwell time per candidate bitrate (ms)
+#define CAN_SCAN_RECENT_MS       200u   // "a frame was received recently" guard
+
+// Candidates, tried in order (all supported nominal rates). Starts with the
+// common rates then the rest.
+static const enum can_bitrate can_scan_rates[] = {
+    CAN_BITRATE_1000K, CAN_BITRATE_500K, CAN_BITRATE_250K, CAN_BITRATE_125K,
+    CAN_BITRATE_100K,  CAN_BITRATE_83_3K, CAN_BITRATE_50K, CAN_BITRATE_20K,
+    CAN_BITRATE_10K,   CAN_BITRATE_750K,  CAN_BITRATE_5000K,
+};
+#define CAN_SCAN_NUM  (sizeof(can_scan_rates) / sizeof(can_scan_rates[0]))
+
+typedef enum { CAN_SCAN_IDLE = 0, CAN_SCAN_RUNNING, CAN_SCAN_LOCKED } can_scan_state_t;
+
+static volatile uint32_t rx_frame_count = 0;    // frames stored by can_rx_isr
+static uint32_t current_bitrate_hz = CAN_BITRATE_HZ_1000K;
+static can_scan_state_t scan_state = CAN_SCAN_IDLE;
+static uint8_t  scan_idx = 0;
+static uint32_t scan_last_count = 0;
+static uint32_t scan_last_rx_tick = 0;
+static uint32_t scan_win_start = 0;
+static uint32_t scan_win_base = 0;
+static volatile int32_t scan_lock_hz = -1;
+
 
 // DLC code to byte count conversion
 int8_t hal_dlc_code_to_bytes(uint32_t hal_dlc_code)
@@ -490,6 +516,8 @@ int32_t can_apply_bitrate_hz(uint32_t hz)
     else
         return -1;
 
+    current_bitrate_hz = hz;
+
     if (bus_state == ON_BUS)
     {
         // Hot-reconfigure the peripheral for the new nominal bitrate WITHOUT
@@ -507,6 +535,117 @@ int32_t can_apply_bitrate_hz(uint32_t hz)
         can_set_bitrate(match);
     }
     return 0;
+}
+
+
+// ---- Auto bitrate scan implementation ----
+
+// enum rate -> Hz
+static uint32_t can_bitrate_to_hz(enum can_bitrate b)
+{
+    switch (b) {
+        case CAN_BITRATE_10K:   return CAN_BITRATE_HZ_10K;
+        case CAN_BITRATE_20K:   return CAN_BITRATE_HZ_20K;
+        case CAN_BITRATE_50K:   return CAN_BITRATE_HZ_50K;
+        case CAN_BITRATE_100K:  return CAN_BITRATE_HZ_100K;
+        case CAN_BITRATE_125K:  return CAN_BITRATE_HZ_125K;
+        case CAN_BITRATE_250K:  return CAN_BITRATE_HZ_250K;
+        case CAN_BITRATE_500K:  return CAN_BITRATE_HZ_500K;
+        case CAN_BITRATE_750K:  return CAN_BITRATE_HZ_750K;
+        case CAN_BITRATE_1000K: return CAN_BITRATE_HZ_1000K;
+        case CAN_BITRATE_5000K: return CAN_BITRATE_HZ_5000K;
+        case CAN_BITRATE_83_3K:
+        default:                return CAN_BITRATE_HZ_83_3K;
+    }
+}
+
+// Bus trouble indicator: high error counters / error-passive. With the wrong
+// nominal bitrate but live traffic the receive error counter climbs (frames
+// fail form/stuff/CRC); at the right rate it stays low.
+static uint8_t can_bus_error_detected(void)
+{
+    FDCAN_ErrorCounters ec;
+    FDCAN_GetErrorCounters(FDCAN1, &ec);
+    if (ec.RxErrorPassive)
+        return 1;
+    if (ec.RxErrorCnt >= CAN_SCAN_ERR_THRESHOLD)
+        return 1;
+    if (ec.TxErrorCnt >= CAN_SCAN_ERR_THRESHOLD)
+        return 1;
+    return 0;
+}
+
+// Switch to candidate slot idx and open a fresh observation window.
+static void can_scan_switch(uint8_t idx, uint32_t now)
+{
+    uint32_t hz = can_bitrate_to_hz(can_scan_rates[idx]);
+    can_apply_bitrate_hz(hz);          // hot reconfig; TX cache is preserved
+    current_bitrate_hz = hz;
+    scan_win_start = now;
+    scan_win_base  = rx_frame_count;
+}
+
+void can_scan_poll(void)
+{
+    uint32_t now = system_get_ticks();
+
+    // Track the most recent RX activity (frames stored by the ISR).
+    if (rx_frame_count != scan_last_count) {
+        scan_last_count = rx_frame_count;
+        scan_last_rx_tick = now;
+    }
+
+    if (bus_state != ON_BUS)
+        return;
+
+    switch (scan_state) {
+    case CAN_SCAN_IDLE:
+        // Trigger: bus-error activity while nothing is being received.
+        if (can_bus_error_detected() &&
+            (now - scan_last_rx_tick) >= CAN_SCAN_RECENT_MS) {
+            scan_idx = 0;
+            scan_state = CAN_SCAN_RUNNING;
+            can_scan_switch(0, now);
+        }
+        break;
+
+    case CAN_SCAN_RUNNING:
+        if (rx_frame_count != scan_win_base) {
+            // A valid frame arrived at this rate -> lock it.
+            scan_lock_hz = (int32_t)current_bitrate_hz;
+            scan_state = CAN_SCAN_LOCKED;
+        } else if ((now - scan_win_start) >= CAN_SCAN_WINDOW_MS) {
+            scan_idx = (uint8_t)((scan_idx + 1u) % CAN_SCAN_NUM);
+            can_scan_switch(scan_idx, now);
+        }
+        break;
+
+    case CAN_SCAN_LOCKED:
+    default:
+        // Re-arm: if trouble appears again with no reception, rescan.
+        if (can_bus_error_detected() &&
+            (now - scan_last_rx_tick) >= CAN_SCAN_RECENT_MS) {
+            scan_idx = 0;
+            scan_state = CAN_SCAN_RUNNING;
+            can_scan_switch(0, now);
+        }
+        break;
+    }
+}
+
+int32_t can_scan_take_lock(void)
+{
+    int32_t hz;
+    __disable_irq();
+    hz = scan_lock_hz;
+    scan_lock_hz = -1;
+    __enable_irq();
+    return hz;
+}
+
+uint32_t can_get_bitrate_hz(void)
+{
+    return current_bitrate_hz;
 }
 
 
@@ -689,6 +828,7 @@ void can_rx_isr(void)
                            rxqueue.data[rxqueue.head]) == SUCCESS)
         {
             rxqueue.head = next;
+            rx_frame_count++;
         }
         else
         {
