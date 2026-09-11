@@ -27,6 +27,7 @@ constexpr uint8_t SOF1      = 0xAA;
 constexpr uint8_t CMD_SOF2  = 0xAA;   // 命令帧
 constexpr uint8_t DATA_SOF2 = 0xAB;   // 数据帧
 constexpr uint8_t RSP_SOF2  = 0xAC;   // 响应/事件帧 (MCU->host)
+constexpr uint8_t LOG_SOF2  = 0xAD;   // 警告/报错帧 (MCU->host): AA AD | TEXT(ASCII) | CRC | DA AA
 
 // ---- CTRL 位 ----
 constexpr uint8_t CTRL_FDF   = 0x80;  // CAN FD
@@ -85,8 +86,13 @@ struct RxResponse {              // AA AC
     uint32_t value = 0;
 };
 
+struct LogMessage {              // AA AD（警告/报错）
+    QString text;               // ASCII 正文（错误码）
+    bool crcOk = true;          // CRC 校验结果（不符仍显示）
+};
+
 struct Message {
-    enum Type { CanFrame, Response, StatusLine, Text };
+    enum Type { CanFrame, Response, StatusLine, Text, Log };
     Type type = Text;
     RxFrame frame;
     RxResponse response;
@@ -104,7 +110,7 @@ private:
     bool tryParseBinary(int &outConsumed);
     void emitFrame(int idBytes, bool fd, int dataBytes);
     void finishResponse();
-    enum State { IDLE, HDR, CMD, DATA_ACC, RSP_ID, RSP_PAYLOAD, TEXT };
+    enum State { IDLE, HDR, CMD, DATA_ACC, RSP_ID, RSP_PAYLOAD, TEXT, LOG_TEXT, LOG_TAIL };
     State m_state = IDLE;
     QByteArray m_buf;      // 二进制帧累积
     QString m_text;        // ASCII 状态行累积
@@ -112,6 +118,12 @@ private:
     uint8_t m_rspId = 0;
     QVector<Message> m_msgs;
 };
+
+// ---- 显示辅助 ----
+// 把一帧 CAN 帧格式化为一行文本（dir = "RX"/"TX"），供滚动视图复用
+QString formatCanFrame(const RxFrame &f, const char *dir);
+// 解码一帧完整的 AA AB 线上帧（用于 TX 回显）；成功返回 true
+bool decodeDataFrame(const QByteArray &wire, RxFrame *out);
 
 // ---- 自检：返回 true 表示全部通过，报告写入 report ----
 bool selfTest(QString *report);

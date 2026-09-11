@@ -25,6 +25,8 @@ class QLineEdit;
 class QTableWidget;
 class QPlainTextEdit;
 class QLabel;
+class QToolButton;
+class QCloseEvent;
 class QTimer;
 
 class MainWindow : public QMainWindow
@@ -46,6 +48,11 @@ public:
     void feedRx(const proto::RxFrame &f);
     int  rxRowCount() const;
     QString rxCellText(int row, int col) const;
+    // 接收区：滚动视图文本（供无头自测读取）
+    QString scrollText() const;
+    // 持久化（供无头自测复用；正常由 closeEvent 自动调用）
+    void saveSettings();
+    void loadSettings();
 
     // 导出已勾选记录为 CSV 文本（不含写文件）；供 UI 与无头自测校验
     QString buildExportCsv() const;
@@ -60,6 +67,7 @@ private slots:
     void onFrameReceived(const proto::RxFrame &f);
     void onResponseReceived(const proto::RxResponse &r);
     void onStatusLine(const QString &line);
+    void onLogMessage(const proto::LogMessage &m);   // AA AD 警告/报错
 
     void onBitrateChanged(int idx);
     void onIntervalChanged(int ms);
@@ -72,6 +80,9 @@ private slots:
     void onSend();
     void onStop();
     void onQueryStatus();
+
+protected:
+    void closeEvent(QCloseEvent *e) override;
 
 private:
     // ---- 发送表格 ----
@@ -98,9 +109,11 @@ private:
     void queueBytes(const QByteArray &bytes, const QString &note);
     void queueCommand(proto::Cmd cmd, quint32 value, const QString &note);
     void flushTx(const QString &note);
-    void logTx(const QByteArray &bytes, const QString &note);
-    void logRx(const QString &text);
-    void logInfo(const QString &text);
+    void logWarn(const QString &text);          // 写入日志区（警告）
+    void logError(const QString &text);         // 写入日志区（报错）
+    void logInfo(const QString &text);          // 状态提示（写状态栏，不进日志）
+    void appendScroll(const QString &dir, const proto::RxFrame &f);  // 滚动视图追加一行（含表头）
+    void setRxMode(bool scroll);                // 切换接收区显示模式并更新提示/图标
     void setPortUiEnabled(bool open);
 
     SerialLink *m_serial = nullptr;
@@ -135,6 +148,11 @@ private:
     QTableWidget *m_rxTable = nullptr;
     QPushButton *m_clearRxBtn = nullptr;
     QHash<quint32, int> m_rxRowById;     // 帧 id -> 接收表行号
+    QTableWidget *m_scrollTable = nullptr; // 滚动显示（带固定表头，数据行滚动追加）
+    QToolButton *m_modeBtn = nullptr;    // 切换图标（就地更新 <-> 滚动显示）
+    QLabel *m_modeLbl = nullptr;         // 上方文本提示：当前显示模式
+    QCheckBox *m_tsBox = nullptr;        // 滚动行是否显示时间戳
+    bool m_scrollMode = false;           // false=就地更新, true=滚动显示
 
     // 操作
     QPushButton *m_sendBtn = nullptr;

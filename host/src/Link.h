@@ -37,6 +37,7 @@ signals:
     void frameReceived(const proto::RxFrame &f);
     void responseReceived(const proto::RxResponse &r);
     void statusLineReceived(const QString &line);
+    void logMessageReceived(const proto::LogMessage &m);   // AA AD 警告/报错
     void rawTx(const QByteArray &bytes);
     void rawRx(const QByteArray &bytes);
 
@@ -52,6 +53,11 @@ protected:
             case proto::Message::CanFrame:   emit frameReceived(m.frame); break;
             case proto::Message::Response:   emit responseReceived(m.response); break;
             case proto::Message::StatusLine: emit statusLineReceived(m.text); break;
+            case proto::Message::Log: {
+                proto::LogMessage lm; lm.text = m.text; lm.crcOk = m.crcOk;
+                emit logMessageReceived(lm);
+                break;
+            }
             default: break;
             }
         }

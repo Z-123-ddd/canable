@@ -30,6 +30,11 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QMessageBox>
+#include <QCloseEvent>
+#include <QToolButton>
+#include <QScrollBar>
+#include <QFont>
+#include <QSettings>
 
 // ---------------------------------------------------------------------------
 //  CAN 波特率下拉项（显示名 -> Hz）
@@ -57,6 +62,9 @@ enum Col { COL_NO = 0, COL_CHK, COL_ID, COL_IDTYPE, COL_LEN, COL_FRAMETYPE, COL_
 
 // 接收表列：帧ID | 类型 | 长度 | 数据 | 次数
 enum RxCol { RX_ID = 0, RX_TYPE, RX_LEN, RX_DATA, RX_COUNT, RX_COL_COUNT };
+
+// 滚动视图列：方向 | 帧ID | 类型 | 长度 | 数据
+enum ScrollCol { SC_DIR = 0, SC_ID, SC_TYPE, SC_LEN, SC_DATA, SC_COL_COUNT };
 
 // 发送字节长度可选值（DLC 字节数）
 static const int kLenValues[] = {0,1,2,3,4,5,6,7,8,12,16,20,24,32,48,64};
@@ -109,6 +117,7 @@ MainWindow::MainWindow(QWidget *parent)
         connect(lk, &Link::frameReceived,      this, &MainWindow::onFrameReceived);
         connect(lk, &Link::responseReceived,   this, &MainWindow::onResponseReceived);
         connect(lk, &Link::statusLineReceived, this, &MainWindow::onStatusLine);
+        connect(lk, &Link::logMessageReceived,  this, &MainWindow::onLogMessage);
     }
 
     // ======================= 左列：发送 =======================
@@ -261,8 +270,31 @@ MainWindow::MainWindow(QWidget *parent)
     root->addWidget(left, 3);
 
     // ======================= 右列：接收 =======================
-    auto *rxBox = new QGroupBox(QStringLiteral("接收区 (相同帧ID就地更新，不滚动)"));
+    auto *rxBox = new QGroupBox(QStringLiteral("接收区"));
     auto *rv = new QVBoxLayout(rxBox);
+
+    // 顶部：当前显示模式文字提示 + 切换图标
+    auto *rtop = new QHBoxLayout;
+    m_modeLbl = new QLabel;                         // 上方文本提示：当前模式
+    m_modeLbl->setObjectName("modeLbl");
+    m_modeBtn = new QToolButton;                    // 切换图标
+    m_modeBtn->setObjectName("modeBtn");
+    m_modeBtn->setText(QStringLiteral("\u21c4"));   // ⇄
+    m_modeBtn->setToolTip(QStringLiteral("切换接收区显示模式"));
+    m_modeBtn->setAutoRaise(true);
+    {
+        QFont f = m_modeBtn->font();
+        f.setPointSize(f.pointSize() + 4);
+        m_modeBtn->setFont(f);
+    }
+    m_tsBox = new QCheckBox(QStringLiteral("显示时间戳"));
+    m_tsBox->setObjectName("tsBox");
+    rtop->addWidget(m_modeLbl);
+    rtop->addWidget(m_modeBtn);
+    rtop->addSpacing(12);
+    rtop->addWidget(m_tsBox);
+    rtop->addStretch();
+    rv->addLayout(rtop);
 
     m_rxTable = new QTableWidget(0, RX_COL_COUNT);
     m_rxTable->setObjectName("rxTable");
@@ -280,6 +312,24 @@ MainWindow::MainWindow(QWidget *parent)
     m_rxTable->verticalHeader()->setVisible(false);
     m_rxTable->setMinimumWidth(420);
     rv->addWidget(m_rxTable, 1);
+
+    m_scrollTable = new QTableWidget(0, SC_COL_COUNT);   // 滚动显示：表头固定，数据行滚动追加
+    m_scrollTable->setObjectName("scroll");
+    m_scrollTable->setHorizontalHeaderLabels({
+        QStringLiteral("方向"), QStringLiteral("帧ID(hex)"), QStringLiteral("类型"),
+        QStringLiteral("长度"), QStringLiteral("数据(hex)")});
+    m_scrollTable->horizontalHeader()->setSectionResizeMode(SC_DATA, QHeaderView::Stretch);
+    for (int c = 0; c < SC_COL_COUNT; c++)
+        if (c != SC_DATA) m_scrollTable->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
+    m_scrollTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_scrollTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_scrollTable->setShowGrid(false);
+    m_scrollTable->setFrameShape(QFrame::NoFrame);
+    m_scrollTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
+    m_scrollTable->verticalHeader()->setVisible(false);
+    m_scrollTable->setMinimumWidth(420);
+    m_scrollTable->setVisible(false);
+    rv->addWidget(m_scrollTable, 1);
 
     auto *rb = new QHBoxLayout;
     m_clearRxBtn = new QPushButton(QStringLiteral("清空接收"));
@@ -317,6 +367,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_resetBtn, &QPushButton::clicked, this, &MainWindow::onResetList);
     connect(m_exportBtn, &QPushButton::clicked, this, &MainWindow::onExportCsv);
     connect(m_clearRxBtn, &QPushButton::clicked, this, &MainWindow::onClearRx);
+    connect(m_modeBtn, &QToolButton::clicked, this, [this]() {
+        setRxMode(!m_scrollMode);                 // 点击图标切换到另一种模式
+    });
     connect(m_clearLogBtn, &QPushButton::clicked, this, &MainWindow::onClearLog);
     connect(m_sendBtn,  &QPushButton::clicked, this, &MainWindow::onSend);
     connect(m_stopBtn,  &QPushButton::clicked, this, &MainWindow::onStop);
@@ -324,7 +377,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     refreshPorts();
     setPortUiEnabled(false);
-    logInfo(QStringLiteral("就绪。勾选列表行数决定单帧/列表发送；仅数据变化时才下发数据帧。"));
+    logInfo(QStringLiteral("就绪。"));
+    setRxMode(false);                             // 默认：就地更新
+    loadSettings();                               // 恢复上次填写的内容与参数
 }
 
 MainWindow::~MainWindow() = default;
@@ -409,7 +464,7 @@ void MainWindow::onPortClosed()
 
 void MainWindow::onSerialError(const QString &msg)
 {
-    logInfo(QStringLiteral("[错误] %1").arg(msg));
+    logError(msg);
 }
 
 void MainWindow::setPortUiEnabled(bool open)
@@ -622,7 +677,7 @@ void MainWindow::onExportCsv()
     const QString csv = buildExportCsv();
     int rows = csv.count(QStringLiteral("\r\n")) - 1;   // 去掉表头
     if (rows <= 0) {
-        logInfo(QStringLiteral("没有已勾选且已填写 ID 的记录可导出。"));
+        logWarn(QStringLiteral("没有已勾选且已填写 ID 的记录可导出。"));
         return;
     }
 
@@ -636,7 +691,7 @@ void MainWindow::onExportCsv()
 
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        logInfo(QStringLiteral("导出失败：无法写入 %1").arg(path));
+        logError(QStringLiteral("导出失败：无法写入 %1").arg(path));
         return;
     }
     // UTF-8 BOM，便于 Excel 正确识别中文
@@ -648,8 +703,9 @@ void MainWindow::onExportCsv()
 
 void MainWindow::onClearRx()
 {
-    m_rxTable->setRowCount(0);
+    m_rxTable->setRowCount(0);          // 静止：就地更新表
     m_rxRowById.clear();
+    if (m_scrollTable) m_scrollTable->setRowCount(0);   // 滚动：滚动表
 }
 
 void MainWindow::onClearLog()
@@ -693,6 +749,7 @@ void MainWindow::feedRx(const proto::RxFrame &f)
     m_rxTable->item(row, RX_DATA)->setText(
         QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_rxTable->item(row, RX_COUNT)->setText(QString::number(count));
+    appendScroll(QStringLiteral("RX"), f);            // 收一条
 }
 
 int MainWindow::rxRowCount() const
@@ -747,7 +804,7 @@ MainWindow::Payload MainWindow::collectPayload(QString *info) const
 void MainWindow::onSend()
 {
     if (!m_link->isOpen()) {
-        logInfo(QStringLiteral("串口未打开。"));
+        logWarn(QStringLiteral("串口未打开。"));
         return;
     }
     doSend();
@@ -759,7 +816,7 @@ QString MainWindow::doSend()
     Payload p = collectPayload(&info);
 
     if (p.empty()) {
-        logInfo(QStringLiteral("无可发送数据（编辑区为空且未勾选任何行）。"));
+        logWarn(QStringLiteral("无可发送数据（编辑区为空且未勾选任何行）。"));
         return QStringLiteral("empty; changed=0 ptrig=0");
     }
 
@@ -782,17 +839,23 @@ QString MainWindow::doSend()
         m_lastInterval = interval;
     }
 
+    // 无论数据是否变化，都在滚动区打印"要发送的帧"（仅显示，不代表真实下发）。
+    for (const QByteArray &f : p.frames) {
+        proto::RxFrame rx;
+        if (proto::decodeDataFrame(f, &rx))
+            appendScroll(QStringLiteral("TX"), rx);
+    }
+
     if (changed) {
+        // 仅在数据变化时，才把数据帧打包发给 MCU
         for (const QByteArray &f : p.frames) {
             queueBytes(f, p.isList ? QStringLiteral("列表帧") : QStringLiteral("单帧"));
         }
         m_lastInit = true;
         m_lastIsList = p.isList;
         m_lastFrames = p.frames;
-        logInfo(QStringLiteral("%1；数据已变化，已打包下发。").arg(info));
-    } else {
-        logInfo(QStringLiteral("%1；数据未变，仅下发发送命令。").arg(info));
     }
+    // 数据未变化：不重发数据帧，实际只下发下面的 TX_START 命令（MCU 重发其缓存帧）
 
     queueCommand(proto::CMD_TX_START, trig,
                  QStringLiteral("触发发送 (%1)").arg(trig ? "连续" : "单次"));
@@ -862,7 +925,6 @@ void MainWindow::queueBytes(const QByteArray &bytes, const QString &note)
     if (bytes.isEmpty())
         return;
     m_txBuf.append(bytes);   // 拼接到同一条消息
-    logTx(bytes, note);
 }
 
 void MainWindow::queueCommand(proto::Cmd cmd, quint32 value, const QString &note)
@@ -877,8 +939,7 @@ void MainWindow::flushTx(const QString &note)
     m_link->send(m_txBuf);          // 一次性写出整条消息
     m_lastFlush = m_txBuf;
     m_txFlushCount++;
-    logInfo(QStringLiteral("%1：单次写入 %2 字节")
-                .arg(note).arg(m_txBuf.size()));
+    (void)note;
     m_txBuf.clear();
 }
 
@@ -888,43 +949,74 @@ void MainWindow::sendCommand(proto::Cmd cmd, quint32 value, const QString &note)
     flushTx(note);
 }
 
-void MainWindow::logTx(const QByteArray &bytes, const QString &note)
+void MainWindow::logWarn(const QString &text)
 {
-    m_log->appendPlainText(QStringLiteral("[%1] TX  %2  %3")
-        .arg(QTime::currentTime().toString("HH:mm:ss.zzz"),
-             QString::fromLatin1(bytes.toHex(' ').toUpper()), note));
-}
-
-void MainWindow::logRx(const QString &text)
-{
-    m_log->appendPlainText(QStringLiteral("[%1] RX  %2")
+    m_log->appendPlainText(QStringLiteral("[%1] 警告  %2")
         .arg(QTime::currentTime().toString("HH:mm:ss.zzz"), text));
 }
 
+void MainWindow::logError(const QString &text)
+{
+    m_log->appendPlainText(QStringLiteral("[%1] 错误  %2")
+        .arg(QTime::currentTime().toString("HH:mm:ss.zzz"), text));
+}
+
+// 状态提示不进日志区，改写到状态栏
 void MainWindow::logInfo(const QString &text)
 {
-    m_log->appendPlainText(QStringLiteral("[%1] --  %2")
-        .arg(QTime::currentTime().toString("HH:mm:ss.zzz"), text));
+    if (m_statusLbl) m_statusLbl->setText(text);
+}
+
+void MainWindow::appendScroll(const QString &dir, const proto::RxFrame &f)
+{
+    if (!m_scrollTable || !m_scrollMode) return;
+
+    // 仅当滑条已在最底端时才自动跟随滚动；否则保留用户当前查看位置
+    // （数据仍在下方追加，只是不强制把视图拉到底部）
+    QScrollBar *vsb = m_scrollTable->verticalScrollBar();
+    const bool follow = (vsb->value() >= vsb->maximum());
+
+    const int row = m_scrollTable->rowCount();
+    m_scrollTable->insertRow(row);
+    QString dirTxt = dir;
+    if (m_tsBox && m_tsBox->isChecked())
+        dirTxt = QStringLiteral("%1 %2").arg(QTime::currentTime().toString("HH:mm:ss.zzz"), dir);
+    auto set = [&](int c, const QString &t) {
+        auto *it = new QTableWidgetItem(t);
+        it->setFlags(Qt::ItemIsEnabled);
+        m_scrollTable->setItem(row, c, it);
+    };
+    set(SC_DIR, dirTxt);
+    set(SC_ID,  QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+    set(SC_TYPE, rxTypeText(f));
+    set(SC_LEN, QString::number(f.data.size()));
+    set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
+    if (m_scrollTable->rowCount() > 5000) m_scrollTable->removeRow(0);   // 上限，滚掉最旧行
+    if (follow) m_scrollTable->scrollToBottom();   // 仅当原本在底部时才跟随
+}
+
+// 切换接收区显示模式：false=就地更新（按 ID 汇总）, true=滚动显示（发一条收一条）
+void MainWindow::setRxMode(bool scroll)
+{
+    m_scrollMode = scroll;
+    if (m_rxTable) m_rxTable->setVisible(!scroll);
+    if (m_scrollTable) m_scrollTable->setVisible(scroll);
+    if (m_modeLbl)
+        m_modeLbl->setText(scroll ? QStringLiteral("滚动") : QStringLiteral("就地"));
+    if (m_modeBtn)
+        m_modeBtn->setToolTip(scroll ? QStringLiteral("点击切换为：就地更新")
+                                     : QStringLiteral("点击切换为：滚动显示"));
 }
 
 void MainWindow::onFrameReceived(const proto::RxFrame &f)
 {
-    // 日志记录
-    logRx(QStringLiteral("CAN id=0x%1 %2%3%4 dlc=%5 data=[%6]")
-        .arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0'))
-        .arg(f.ext ? "EXT " : "")
-        .arg(f.fd ? "FD " : "")
-        .arg(f.brs ? "BRS " : "")
-        .arg(f.dlc)
-        .arg(QString::fromLatin1(f.data.toHex(' ').toUpper())));
-    // 接收区就地更新
-    feedRx(f);
+    feedRx(f);                                        // 接收表就地更新 + 滚动回显
 }
 
 void MainWindow::onResponseReceived(const proto::RxResponse &r)
 {
     if (r.id == proto::RSP_BITRATE_LOCK) {
-        logRx(QStringLiteral("AA AC 波特率锁定 = %1 Hz").arg(r.value));
+        logInfo(QStringLiteral("波特率锁定 = %1 Hz").arg(r.value));
         for (int i = 0; i < m_bitrateBox->count(); i++) {
             if ((quint32)m_bitrateBox->itemData(i).toUInt() == r.value) {
                 QSignalBlocker b(m_bitrateBox);
@@ -933,16 +1025,157 @@ void MainWindow::onResponseReceived(const proto::RxResponse &r)
             }
         }
     } else {
-        logRx(QStringLiteral("AA AC 响应 id=%1 value=%2").arg(r.id).arg(r.value));
+        logInfo(QStringLiteral("AA AC id=%1 value=%2").arg(r.id).arg(r.value));
     }
 }
 
 void MainWindow::onStatusLine(const QString &line)
 {
-    logRx(QStringLiteral("状态: %1").arg(line));
+    logInfo(QStringLiteral("状态: %1").arg(line));
 }
 
 QString MainWindow::logText() const
 {
     return m_log->toPlainText();
+}
+
+// ---------------------------------------------------------------------------
+//  AA AD 警告/报错帧 -> 日志区（日志区仅显示警告与报错）
+// ---------------------------------------------------------------------------
+void MainWindow::onLogMessage(const proto::LogMessage &m)
+{
+    QString t = m.text;
+    if (t.isEmpty())
+        t = QStringLiteral("AA AD（无正文）");
+    if (!m.crcOk)
+        t += QStringLiteral("  (CRC 校验失败)");
+    // 无显式级别字段：正文含 WARN / 警告 视为警告，否则按报错
+    if (t.contains(QStringLiteral("WARN"), Qt::CaseInsensitive) ||
+        t.contains(QStringLiteral("警告")))
+        logWarn(t);
+    else
+        logError(t);
+}
+
+QString MainWindow::scrollText() const
+{
+    if (!m_scrollTable) return QString();
+    QString out;
+    for (int r = 0; r < m_scrollTable->rowCount(); r++) {
+        QStringList cells;
+        for (int c = 0; c < SC_COL_COUNT; c++) {
+            auto *it = m_scrollTable->item(r, c);
+            cells << (it ? it->text() : QString());
+        }
+        out += cells.join(QLatin1Char(' ')) + QLatin1Char('\n');
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+//  持久化（QSettings）：保存/恢复全部可填项（不含窗口几何）
+// ---------------------------------------------------------------------------
+void MainWindow::saveSettings()
+{
+    QSettings st;
+    st.setValue("table/rows", m_table->rowCount());
+    for (int r = 0; r < m_table->rowCount(); r++) {
+        const QString p = QStringLiteral("table/%1/").arg(r);
+        auto *chk = m_table->item(r, COL_CHK);
+        st.setValue(p + "check", chk && chk->checkState() == Qt::Checked);
+        auto *idIt = m_table->item(r, COL_ID);
+        st.setValue(p + "id", idIt ? idIt->text() : QString());
+        auto *dIt = m_table->item(r, COL_DATA);
+        st.setValue(p + "data", dIt ? dIt->text() : QString());
+        auto cdata = [&](int col, int def) -> int {
+            auto *w = qobject_cast<QComboBox *>(m_table->cellWidget(r, col));
+            return w ? w->currentData().toInt() : def;
+        };
+        st.setValue(p + "idtype", cdata(COL_IDTYPE, 0));
+        st.setValue(p + "len",    cdata(COL_LEN, 8));
+        st.setValue(p + "ftype",  cdata(COL_FRAMETYPE, (int)FT_CLASSIC));
+    }
+    st.setValue("edit/id",          m_idEdit->text());
+    st.setValue("edit/idtype",      m_idTypeBox->currentData().toInt());
+    st.setValue("edit/len",         m_lenBox->currentData().toInt());
+    st.setValue("edit/ftype",       m_frameTypeBox->currentData().toInt());
+    st.setValue("edit/data",        m_dataEdit->text());
+    st.setValue("can/bitrateIndex", m_bitrateBox->currentIndex());
+    st.setValue("can/loop",         m_loopBox->isChecked());
+    st.setValue("can/interval",     m_intervalSpin->value());
+    st.setValue("ui/transport",     m_transportBox->currentIndex());
+    st.setValue("ui/port",          m_portBox->currentData().toString());
+    st.setValue("rx/scroll",        m_scrollMode);
+    st.setValue("rx/timestamp",     m_tsBox->isChecked());
+    st.sync();
+}
+
+void MainWindow::loadSettings()
+{
+    QSettings st;
+    // 发送表
+    const int rows = st.value("table/rows", kDefaultRows).toInt();
+    m_table->setRowCount(0);
+    ensureRows(rows < 1 ? kDefaultRows : rows);
+    for (int r = 0; r < m_table->rowCount(); r++) {
+        const QString p = QStringLiteral("table/%1/").arg(r);
+        auto *chk = m_table->item(r, COL_CHK);
+        if (chk) chk->setCheckState(st.value(p + "check", false).toBool() ? Qt::Checked : Qt::Unchecked);
+        auto *idIt = m_table->item(r, COL_ID);
+        if (idIt) idIt->setText(st.value(p + "id", QString()).toString());
+        auto *dIt = m_table->item(r, COL_DATA);
+        if (dIt) dIt->setText(st.value(p + "data", QString()).toString());
+        auto setCombo = [&](int col, const char *key, int def) {
+            auto *w = qobject_cast<QComboBox *>(m_table->cellWidget(r, col));
+            if (!w) return;
+            int idx = w->findData(st.value(p + key, def).toInt());
+            if (idx >= 0) w->setCurrentIndex(idx);
+        };
+        setCombo(COL_IDTYPE,    "idtype", 0);
+        setCombo(COL_LEN,       "len",    8);
+        setCombo(COL_FRAMETYPE, "ftype",  (int)FT_CLASSIC);
+    }
+    // 单帧编辑区
+    m_idEdit->setText(st.value("edit/id", QString()).toString());
+    m_dataEdit->setText(st.value("edit/data", QString()).toString());
+    auto setBox = [&](QComboBox *w, const char *key, int def) {
+        int idx = w->findData(st.value(key, def).toInt());
+        if (idx >= 0) w->setCurrentIndex(idx);
+    };
+    setBox(m_idTypeBox,    "edit/idtype", 0);
+    setBox(m_lenBox,       "edit/len",    8);
+    setBox(m_frameTypeBox, "edit/ftype",  (int)FT_CLASSIC);
+    // CAN 参数
+    {
+        int idx = st.value("can/bitrateIndex", 9).toInt();
+        if (idx >= 0 && idx < m_bitrateBox->count()) {
+            QSignalBlocker b(m_bitrateBox);           // 连接前避免误下发
+            m_bitrateBox->setCurrentIndex(idx);
+        }
+    }
+    m_loopBox->setChecked(st.value("can/loop", false).toBool());
+    m_intervalSpin->setValue(st.value("can/interval", 100).toInt());
+    // 传输 / 端口
+    {
+        int ti = st.value("ui/transport", 0).toInt();
+        if (ti >= 0 && ti < m_transportBox->count()) {
+            QSignalBlocker b(m_transportBox);
+            m_transportBox->setCurrentIndex(ti);
+        }
+        refreshPorts();
+        const QString want = st.value("ui/port", QString()).toString();
+        if (!want.isEmpty()) {
+            int idx = m_portBox->findData(want);
+            if (idx >= 0) m_portBox->setCurrentIndex(idx);
+        }
+    }
+    // 接收区选项
+    setRxMode(st.value("rx/scroll", false).toBool());
+    m_tsBox->setChecked(st.value("rx/timestamp", false).toBool());
+}
+
+void MainWindow::closeEvent(QCloseEvent *e)
+{
+    saveSettings();
+    QMainWindow::closeEvent(e);
 }
