@@ -127,7 +127,7 @@ cd host
   - CRC: 经典 CRC-15 / FD<=16 CRC-17 / FD>16 CRC-21（MSB-first, init0, xorout0）
 - 接收上报：MCU 以同样的 `AA AB` 二进制帧上报；`AA AC 01 <hz:4B LE>` 为波特率锁定；
   GET_STATUS 回一行 ASCII `ST:bus=.. mode=S/L .. err=.....`
-- `AA AD` 为 MCU 主动上报的警告/报错帧：`AA AD | <ASCII 错误码> | CRC | DA AA``
+- `AA AD` 为 MCU 主动上报的警告/报错帧：`AA AD | <ASCII 错误枚举名> | DA AA | CRC`（CRC-8 仅覆盖正文，`AA AD`/`DA AA` 不参与）
 
 详见仓库 `docs/FIRMWARE_PROTOCOL.md`。
 

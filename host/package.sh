@@ -8,7 +8,7 @@
 # ============================================================================
 set -euo pipefail
 
-APPVER="${APPVER:-1.0.2}"
+APPVER="${APPVER:-1.1.2}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 

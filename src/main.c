@@ -52,6 +52,14 @@ int main(void)
     while (1)
     {
         led_process();
+
+        // Report any newly-asserted errors to the host as AA AD warning frames.
+        {
+            int pending_err;
+            while ((pending_err = error_take_pending()) >= 0)
+                usb_proto_send_error((error_t)pending_err);
+        }
+
         cdc_process();
 
         // Auto bitrate scan: cycle candidate rates while the bus shows error

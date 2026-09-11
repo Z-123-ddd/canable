@@ -339,15 +339,16 @@ AA AC | 01 | BITRATE (4B 小端)
 MCU 主动上报警告/报错文本，供上位机日志区显示（日志区仅呈现此类告警信息）：
 
 ```
-AA AD | TEXT(ASCII) | CRC | DA AA
+AA AD | TEXT(ASCII) | DA AA | CRC
 ```
 
 | 字段 | 说明 |
 |---|---|
 | 帧头 | `AA AD`（MCU → host 警告/报错帧） |
-| TEXT | ASCII 错误码/说明文本 |
-| CRC | 1 字节 CRC-8（poly `0x07`, init 0, 无反射），覆盖 TEXT |
+| TEXT | ASCII **错误枚举名**（见 §8 各 `ERR_*`），如 `ERR_USB_BADFRAME` |
 | 尾标 | `DA AA`（ASCII 正文均为 `<0x80`，此两字节均 `>0x7F`，作可靠终止符） |
+| CRC | 1 字节 CRC-8（poly `0x07`, init 0, 无反射），**仅覆盖 TEXT**（`AA AD` 与 `DA AA` 不参与） |
 
-> 上位机即使 CRC 不符也显示正文并加注“CRC 校验失败”。固件当前尚未实现该帧，格式由上位机先行约定。
+> 触发：`error_assert()` 将错误排入队列，**主循环**取出并发送（不在中断上下文发 USB）。
+> 上位机即使 CRC 不符也显示正文并加注“CRC 校验失败”。
 

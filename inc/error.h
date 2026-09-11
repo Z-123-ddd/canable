@@ -31,4 +31,8 @@ void error_assert(error_t err);
 uint32_t error_last_timestamp(void);
 uint32_t error_reg(void);
 
+// Pop one pending error report queued by error_assert() (for the main loop to
+// send an AA AD warning frame). Returns -1 when there is none.
+int error_take_pending(void);
+
 #endif /* INC_ERROR_H_ */

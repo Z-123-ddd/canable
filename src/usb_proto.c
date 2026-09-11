@@ -441,3 +441,61 @@ void usb_proto_send_bitrate_lock(uint32_t hz)
     b[6] = (uint8_t)(hz >> 24);
     cdc_transmit(b, (uint16_t)sizeof(b));
 }
+
+
+// ---- Warning/error (AA AD) frames -----------------------------------------
+// ASCII names, index-aligned with error_t (see inc/error.h).
+static const char *const k_err_names[ERR_MAX] =
+{
+    "ERR_PERIPHINIT",
+    "ERR_USBTX_BUSY",
+    "ERR_CAN_TXFAIL",
+    "ERR_CANRXFIFO_OVERFLOW",
+    "ERR_FULLBUF_CANTX",
+    "ERR_FULLBUF_USBRX",
+    "ERR_FULLBUF_USBTX",
+    "ERR_USB_BADFRAME",
+    "ERR_USB_CRC",
+    "ERR_FRAMELIST_FULL",
+};
+
+// CRC-8, poly 0x07, init 0, MSB-first (matches the host implementation).
+static uint8_t crc8_byte(const uint8_t *p, uint16_t len)
+{
+    uint8_t c = 0;
+    for (uint16_t i = 0; i < len; i++)
+    {
+        c ^= p[i];
+        for (uint8_t b = 0; b < 8; b++)
+            c = (c & 0x80u) ? (uint8_t)((c << 1) ^ 0x07u) : (uint8_t)(c << 1);
+    }
+    return c;
+}
+
+// Emit an AA AD warning/error frame: AA AD | TEXT(ASCII) | DA AA | CRC8.
+// The CRC covers TEXT only (the AA AD and DA AA delimiters are excluded).
+void usb_proto_send_error(error_t err)
+{
+    if ((uint32_t)err >= (uint32_t)ERR_MAX)
+        return;
+
+    const char *name = k_err_names[err];
+    uint8_t text[64];
+    uint16_t tlen = 0;
+    while (name[tlen] != 0 && tlen < (uint16_t)sizeof(text))
+    {
+        text[tlen] = (uint8_t)name[tlen];
+        tlen++;
+    }
+
+    uint8_t frame[2 + sizeof(text) + 2 + 1];
+    uint16_t k = 0;
+    frame[k++] = USB_PROTO_SOF1;              // 0xAA
+    frame[k++] = USB_PROTO_LOG_SOF2;          // 0xAD
+    for (uint16_t i = 0; i < tlen; i++)
+        frame[k++] = text[i];
+    frame[k++] = 0xDA;                        // trailer
+    frame[k++] = 0xAA;
+    frame[k++] = crc8_byte(text, tlen);       // CRC over TEXT only
+    cdc_transmit(frame, k);
+}

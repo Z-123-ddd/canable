@@ -4,8 +4,41 @@
 
 | 构件 | 版本 | 版本来源 |
 |---|---|---|
-| 固件 | **v1.1.1** | `Makefile` 的 `FW_VERSION`；Keil 构建见 `inc/git_version.h` |
-| 上位机 | **v1.0.2** | `host/package.sh` 的 `APPVER`；安装包见 `host/installer/canable2_host.nsi` |
+| 固件 | **v1.1.2** | `Makefile` 的 `FW_VERSION`；Keil 构建见 `inc/git_version.h` |
+| 上位机 | **v1.1.2** | `host/package.sh` 的 `APPVER`；安装包见 `host/installer/canable2_host.nsi` |
+
+---
+
+## 固件 v1.1.2
+
+### 新增 — 错误主动上报帧（`AA AD`）
+
+`error_assert()` 触发的错误现由固件主动上报给上位机：
+
+```
+AA AD | TEXT(ASCII 错误枚举名, 如 ERR_USB_BADFRAME) | DA AA | CRC
+```
+
+- CRC-8（poly `0x07`, init 0，无反射），**仅覆盖 TEXT**；`AA AD` 与 `DA AA` 不参与校验。
+- `error_assert()` 将错误**入队**（可在中断上下文调用），**主循环**取出后发送，避免在
+  中断里操作 USB 发送环。
+- 新增 `error_take_pending()`（`src/error.c`）与 `usb_proto_send_error()`（`src/usb_proto.c`）；
+  主循环（`src/main.c`）排空队列并发送。
+- 版本：固件 v1.1.1 → **v1.1.2**（`Makefile`/`inc/git_version.h`）。
+
+### 变更
+- 上报的是**错误枚举名称字符串**（如 `ERR_USB_BADFRAME`），非枚举值。
+
+---
+
+## 上位机 v1.1.2
+
+### 变更 — `AA AD` 解析对齐新格式
+
+- `AA AD` 解析改为 **CRC 位于 `DA AA` 之后**（此前约定 CRC 在前），CRC 仅校验正文，与固件一致。
+  改动 `host/src/Protocol.cpp` 解析状态机与自检、`host/src/Protocol.h`。
+- 安装包版本 1.0.2 → **1.1.2**（`host/package.sh`、`canable2_host.nsi` 的 `VIProductVersion 1.1.2.0`）。
+- 说明：新布局与此前"CRC 在前"的约定不兼容；固件此前从未发送过该帧，无历史兼容问题。
 
 ---
 

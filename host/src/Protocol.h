@@ -27,7 +27,7 @@ constexpr uint8_t SOF1      = 0xAA;
 constexpr uint8_t CMD_SOF2  = 0xAA;   // 命令帧
 constexpr uint8_t DATA_SOF2 = 0xAB;   // 数据帧
 constexpr uint8_t RSP_SOF2  = 0xAC;   // 响应/事件帧 (MCU->host)
-constexpr uint8_t LOG_SOF2  = 0xAD;   // 警告/报错帧 (MCU->host): AA AD | TEXT(ASCII) | CRC | DA AA
+constexpr uint8_t LOG_SOF2  = 0xAD;   // 警告/报错帧 (MCU->host): AA AD | TEXT(ASCII) | DA AA | CRC
 
 // ---- CTRL 位 ----
 constexpr uint8_t CTRL_FDF   = 0x80;  // CAN FD
@@ -110,7 +110,7 @@ private:
     bool tryParseBinary(int &outConsumed);
     void emitFrame(int idBytes, bool fd, int dataBytes);
     void finishResponse();
-    enum State { IDLE, HDR, CMD, DATA_ACC, RSP_ID, RSP_PAYLOAD, TEXT, LOG_TEXT, LOG_TAIL };
+    enum State { IDLE, HDR, CMD, DATA_ACC, RSP_ID, RSP_PAYLOAD, TEXT, LOG_TEXT, LOG_TAIL, LOG_CRC };
     State m_state = IDLE;
     QByteArray m_buf;      // 二进制帧累积
     QString m_text;        // ASCII 状态行累积

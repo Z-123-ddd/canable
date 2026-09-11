@@ -31,6 +31,7 @@
 
 #include <stdint.h>
 #include "n32h47x_48x.h"
+#include "error.h"
 
 
 // ---- Frame headers ----
@@ -38,6 +39,7 @@
 #define USB_PROTO_CMD_SOF2     0xAA   // command frame (host -> MCU)
 #define USB_PROTO_DATA_SOF2    0xAB   // data frame (host -> MCU, and MCU -> host RX report)
 #define USB_PROTO_RSP_SOF2     0xAC   // response / event frame (MCU -> host)
+#define USB_PROTO_LOG_SOF2     0xAD   // warning/error frame (MCU -> host)
 
 
 // ---- Command frames (AA AA) ----
@@ -122,5 +124,11 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
 
 // Emit the "bitrate locked" response: AA AC 01 | hz[4] LE.
 void usb_proto_send_bitrate_lock(uint32_t hz);
+
+// ---- Warning / error frames (AA AD, MCU -> host) ----
+// Emit: AA AD | TEXT(ASCII error enum) | DA AA | CRC8.
+// CRC-8 (poly 0x07, init 0) covers TEXT only; the AA AD and DA AA delimiters
+// are excluded from the CRC.
+void usb_proto_send_error(error_t err);
 
 #endif /* _USB_PROTO_H */

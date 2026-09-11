@@ -57,7 +57,7 @@ uint32_t crcForFrame(bool fd, int dataBytes, const uint8_t *p, int n)
     return crc15(p, n);
 }
 
-// AA AD 警告/报错帧的 CRC：CRC-8, poly 0x07, init 0（固件未实现，先在上位机固定）
+// AA AD 警告/报错帧的 CRC：CRC-8, poly 0x07, init 0，覆盖 ASCII 正文（不含 AA AD / DA AA）
 static uint8_t crc8(const uint8_t *p, int n)
 {
     uint8_t c = 0;
@@ -257,21 +257,22 @@ void Parser::feed(const QByteArray &bytes)
             else { m_buf.clear(); m_state = IDLE; }   // 超长丢弃
             break;
 
-        case LOG_TAIL:
-            if (by == 0xAA) {
-                Message m; m.type = Message::Log; m.crcOk = true;
-                if (m_buf.size() >= 1) {
-                    uint8_t crcByte = (uint8_t)m_buf[m_buf.size() - 1];
-                    QByteArray text = m_buf.left(m_buf.size() - 1);
-                    m.crcOk = (crc8((const uint8_t *)text.constData(), text.size()) == crcByte);
-                    m.text = QString::fromLatin1(text);
-                }
+        case LOG_TAIL:                             // 期待尾标 DA AA，随后是 1 字节 CRC
+            if (by == 0xAA) { m_state = LOG_CRC; }
+            else {
+                if (m_buf.size() < 510) { m_buf.append(char(0xDA)); m_buf.append(char(by)); }
+                m_state = LOG_TEXT;
+            }
+            break;
+
+        case LOG_CRC:                              // CRC 位于 DA AA 之后，仅覆盖 ASCII 正文
+            {
+                Message m; m.type = Message::Log;
+                m.crcOk = (crc8((const uint8_t *)m_buf.constData(), m_buf.size()) == (uint8_t)by);
+                m.text = QString::fromLatin1(m_buf);
                 m_msgs.append(m);
                 m_buf.clear();
                 m_state = IDLE;
-            } else {
-                if (m_buf.size() < 510) { m_buf.append(char(0xDA)); m_buf.append(char(by)); }
-                m_state = LOG_TEXT;
             }
             break;
         }
@@ -467,7 +468,7 @@ bool selfTest(QString *report)
             for (int b = 0; b < 8; b++) cb = (cb & 0x80) ? (uint8_t)((cb << 1) ^ 0x07) : (uint8_t)(cb << 1);
         }
         QByteArray log1; log1.append(char(0xAA)); log1.append(char(0xAD));
-        log1 += body; log1.append(char(cb)); log1.append(char(0xDA)); log1.append(char(0xAA));
+        log1 += body; log1.append(char(0xDA)); log1.append(char(0xAA)); log1.append(char(cb));
         {
             Parser ps; ps.feed(log1);
             auto msgs = ps.takeMessages();
@@ -476,7 +477,7 @@ bool selfTest(QString *report)
                   "解析 AA AD 警告帧（正常 + CRC 通过）");
         }
         {
-            QByteArray bad = log1; bad[bad.size() - 3] = char(0x00);   // 破坏 CRC
+            QByteArray bad = log1; bad[bad.size() - 1] = char(0x00);   // 破坏 CRC
             Parser ps; ps.feed(bad);
             auto msgs = ps.takeMessages();
             check(msgs.size() == 1 && msgs[0].type == Message::Log &&
