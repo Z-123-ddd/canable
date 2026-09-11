@@ -33,6 +33,7 @@ add_executable(canable2_host WIN32
     src/VendorDfuFlasher.cpp
     src/dfu_device.cpp
     src/FirmwareDialog.cpp
+    src/TraceImporter.cpp
 )
 
 # 生成的 exe 文件名（品牌化）；内部 target 名仍为 canable2_host

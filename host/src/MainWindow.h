@@ -74,6 +74,7 @@ private slots:
 
     void onResetList();     // 重置为 20 行空表格（默认值）
     void onExportCsv();     // 导出已勾选记录为 CSV
+    void onImportCsv();     // 导入其他 CAN 工具的记录文件到发送列表
     void onUpdateFirmware();// 进入 DFU 并打开固件更新对话框
     void onClearRx();       // 清空接收区
     void onClearLog();      // 清空日志
@@ -143,6 +144,7 @@ private:
     QTableWidget *m_table = nullptr;
     QPushButton *m_resetBtn = nullptr;
     QPushButton *m_exportBtn = nullptr;
+    QPushButton *m_importBtn = nullptr;
 
     // 接收区（接收表格）
     QTableWidget *m_rxTable = nullptr;

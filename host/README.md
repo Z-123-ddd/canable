@@ -18,7 +18,25 @@
 - **循环发送**   → 复选框（决定 TX_START 的 value：勾=1 连续 / 不勾=0 单次）
 - 周期(ms) 输入框 → 命令 6（1..1000）
 - 帧编辑（ID/扩展/FD/BRS/RTR/DLC/数据）+ 加入列表 / 清空列表
+- 导入记录 / 导出CSV → 其他 CAN 工具记录文件的导入/导出（见下）
 - 发送 / 停止 / 查询状态 → 命令 2 / 3 / 4
+
+## 导入其他 CAN 工具的记录文件
+
+「发送列表」旁的**导入记录**按钮可导入其他 CAN 调试/分析软件导出的记录，解析成 CAN/CAN FD
+帧填入列表并勾选，点「发送」即重放（复用现有列表模式，不改变发送协议）。
+
+自动识别以下格式：
+
+| 格式 | 来源 | 说明 |
+|---|---|---|
+| Vector ASC (`.asc`) | CANalyzer / CANoe | 经典帧 / CANFD 行 / 扩展帧 `x` 后缀 |
+| PEAK TRC (`.trc`) | PCAN-View | v1.0 / v1.1 / v1.3 / v2.x；按 `;$COLUMNS` 列名 + `;$DELIMITER` 声明符解析，声明与实际不符时自动探测 `, ; \|` 制表符/空白 |
+| candump | SocketCAN | 可读格式 与 `-L` 日志格式 |
+| 通用 CSV (`.csv`) | SavvyCAN 等 | 单列十六进制 或 每字节一列；兼容 python-can Base64 |
+
+> 当前列表不支持远程帧(RTR)：导入时跳过并计数提示；错误帧/注释行同样跳过。
+> 无头验证：`CyberBeast-CANable2.exe --import-trace <file>`。
 
 ## 构建（Windows，工具链在 D 盘）
 ```bash

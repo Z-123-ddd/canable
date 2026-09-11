@@ -19,6 +19,7 @@
 #include <cstdio>
 #include "MainWindow.h"
 #include "Protocol.h"
+#include "TraceImporter.h"
 #include "dfu_device.h"
 #include "VendorDfuFlasher.h"
 #include "UsbLink.h"
@@ -302,6 +303,34 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (QString::fromLocal8Bit(argv[i]) == "--dfu-info") {
             std::fputs(dfu::describeDevice().toLocal8Bit().constData(), stdout);
+            return 0;
+        }
+    }
+
+    // CAN 记录导入测试（无头）：host.exe --import-trace <file>
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--import-trace") {
+            if (i + 1 >= argc) { std::fputs("usage: --import-trace <file>\n", stdout); return 2; }
+            const QString path = QString::fromLocal8Bit(argv[i + 1]);
+            trace::Result r = trace::load(path);
+            if (!r.ok) {
+                std::fputs(("ERROR: " + r.error + "\n").toLocal8Bit().constData(), stdout);
+                return 1;
+            }
+            QByteArray out;
+            out += QStringLiteral("format=%1 frames=%2 skipped=%3\n")
+                       .arg(r.format).arg(r.frames.size()).arg(r.skipped).toLocal8Bit();
+            int shown = 0;
+            for (const trace::Frame &f : r.frames) {
+                if (shown++ >= 12) break;
+                out += QStringLiteral("  id=0x%1 %2 %3 len=%4 data=%5\n")
+                           .arg(f.id, 0, 16).arg(f.extended ? "EXT" : "STD")
+                           .arg(f.fd ? (f.brs ? "FD+BRS" : "FD") : "CAN")
+                           .arg(f.data.size())
+                           .arg(QString::fromLatin1(f.data.toHex(' ').toUpper())).toLocal8Bit();
+            }
+            std::fputs(out.constData(), stdout);
+            std::fputs("IMPORT-TRACE: OK\n", stdout);
             return 0;
         }
     }

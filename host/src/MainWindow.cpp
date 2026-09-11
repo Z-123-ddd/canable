@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "TraceImporter.h"
 #include "SerialLink.h"
 #include "UsbLink.h"
 #include "FirmwareDialog.h"
@@ -229,9 +230,13 @@ MainWindow::MainWindow(QWidget *parent)
     m_resetBtn->setObjectName("resetBtn");
     m_exportBtn = new QPushButton(QStringLiteral("导出CSV"));
     m_exportBtn->setObjectName("exportBtn");
+    m_importBtn = new QPushButton(QStringLiteral("导入记录"));
+    m_importBtn->setObjectName("importBtn");
+    m_importBtn->setToolTip(QStringLiteral("导入其他 CAN 工具导出的记录(CSV/ASC/TRC/candump)到发送列表"));
     auto *hint = new QLabel(QStringLiteral("行内直接填写；勾选√决定发送行"));
     hint->setStyleSheet("color:#666;");
     lb->addWidget(m_resetBtn);
+    lb->addWidget(m_importBtn);
     lb->addWidget(m_exportBtn);
     lb->addWidget(hint);
     lb->addStretch();
@@ -366,6 +371,7 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onIntervalChanged);
     connect(m_resetBtn, &QPushButton::clicked, this, &MainWindow::onResetList);
     connect(m_exportBtn, &QPushButton::clicked, this, &MainWindow::onExportCsv);
+    connect(m_importBtn, &QPushButton::clicked, this, &MainWindow::onImportCsv);
     connect(m_clearRxBtn, &QPushButton::clicked, this, &MainWindow::onClearRx);
     connect(m_modeBtn, &QToolButton::clicked, this, [this]() {
         setRxMode(!m_scrollMode);                 // 点击图标切换到另一种模式
@@ -670,6 +676,64 @@ QString MainWindow::buildExportCsv() const
                         csvField(lenStr), csvField(dataStr));
     }
     return out;
+}
+
+void MainWindow::onImportCsv()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入 CAN 记录"), QString(),
+        QStringLiteral("CAN 记录 (*.csv *.asc *.trc *.log *.txt);;所有文件 (*.*)"));
+    if (path.isEmpty())
+        return;
+
+    const trace::Result res = trace::load(path);
+    if (!res.ok) {
+        logError(QStringLiteral("导入失败：%1").arg(res.error));
+        return;
+    }
+    if (res.frames.isEmpty()) {
+        logWarn(QStringLiteral("未从文件解析到 CAN 帧（识别为 %1）。").arg(res.format));
+        return;
+    }
+
+    m_table->setRowCount(0);
+    ensureRows(res.frames.size());
+    for (int i = 0; i < res.frames.size(); ++i) {
+        const trace::Frame &fr = res.frames[i];
+        m_table->item(i, COL_ID)->setText(QString::number(fr.id, 16).toUpper());
+
+        auto setCombo = [&](int col, int value) {
+            if (auto *w = qobject_cast<QComboBox *>(m_table->cellWidget(i, col)))
+                if (int idx = w->findData(value); idx >= 0)
+                    w->setCurrentIndex(idx);
+        };
+        setCombo(COL_IDTYPE, fr.extended ? 1 : 0);
+
+        // 发送字节长度：取与数据长度一致的可选项（无则取不超过它的最大值）
+        if (auto *w = qobject_cast<QComboBox *>(m_table->cellWidget(i, COL_LEN))) {
+            const int want = fr.data.size();
+            int idx = w->findData(want);
+            if (idx < 0) {
+                int best = -1;
+                for (int k = 0; k < w->count(); ++k) {
+                    const int v = w->itemData(k).toInt();
+                    if (v <= want && v > best) best = v;
+                }
+                if (best >= 0) idx = w->findData(best);
+            }
+            if (idx >= 0) w->setCurrentIndex(idx);
+        }
+        setCombo(COL_FRAMETYPE, fr.fd ? (fr.brs ? FT_FD_BRS : FT_FD) : FT_CLASSIC);
+
+        m_table->item(i, COL_DATA)->setText(QString::fromLatin1(fr.data.toHex(' ').toUpper()));
+        m_table->item(i, COL_CHK)->setCheckState(Qt::Checked);
+    }
+
+    QString msg = QStringLiteral("已导入 %1 帧（识别为 %2）到发送列表并勾选，可直接点“发送”。")
+                      .arg(res.frames.size()).arg(res.format);
+    if (res.skipped > 0)
+        msg += QStringLiteral("（跳过 %1 行：注释/远程帧/错误帧等）").arg(res.skipped);
+    logInfo(msg);
 }
 
 void MainWindow::onExportCsv()

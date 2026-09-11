@@ -5,7 +5,27 @@
 | 构件 | 版本 | 版本来源 |
 |---|---|---|
 | 固件 | **v1.1.1** | `Makefile` 的 `FW_VERSION`；Keil 构建见 `inc/git_version.h` |
-| 上位机 | **v1.0.1** | `host/package.sh` 的 `APPVER`；安装包见 `host/installer/canable2_host.nsi` |
+| 上位机 | **v1.0.2** | `host/package.sh` 的 `APPVER`；安装包见 `host/installer/canable2_host.nsi` |
+
+---
+
+## 上位机 v1.0.2
+
+### 新增 — CAN 记录导入（重放）
+
+从其他 CAN 调试/分析软件导出的记录文件中**导入 CAN/CAN FD 帧到「发送列表」**并重放：
+
+- **自动识别格式**：Vector ASC（`.asc`，CANalyzer/CANoe）、PEAK TRC（`.trc`，PCAN-View）、
+  SocketCAN `candump`（可读格式与 `-L` 日志）、**通用 CSV**（单列十六进制 或 每字节一列，
+  兼容 SavvyCAN 风格；亦兼容 python-can 的 Base64 `data` 列）。
+- 解析后逐帧填入发送列表并勾选，点「发送」即按现有列表模式下发；**不改变**发送协议。
+- 内部实现：`host/src/TraceImporter.{h,cpp}`（字段约定对齐 python-can 对应 Reader）；
+  UI 接入 `host/src/MainWindow.cpp` 的 `onImportCsv()`（新增「导入记录」按钮）。
+- 无头验证：`canable2_host.exe --import-trace <file>`。
+- TRC 解析按 `;$COLUMNS` 列名 + `;$DELIMITER` 声明的分隔符（不再依赖版本号）；
+  优先用声明符，声明与实际不符时自动探测 `, ; | 制表符/空白`，兼容逗号/分号/竖线等变体。
+
+> 说明：当前列表不支持远程帧(RTR)，导入时会跳过并计数提示；错误帧/注释行同样跳过。
 
 ---
 
