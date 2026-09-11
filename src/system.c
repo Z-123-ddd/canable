@@ -133,36 +133,6 @@ void system_delay(uint32_t ms)
 }
 
 
-void system_irq_disable(void)
-{
-    __disable_irq();
-    __DSB();
-    __ISB();
-}
-
-
-void system_irq_enable(void)
-{
-    __enable_irq();
-}
-
-
-void system_hex32(char *out, uint32_t val)
-{
-    char *p = out + 8;
-    *p-- = 0;
-    while (p >= out) {
-        uint8_t nybble = val & 0x0F;
-        if (nybble < 10)
-            *p = '0' + nybble;
-        else
-            *p = 'A' + nybble - 10;
-        val >>= 4;
-        p--;
-    }
-}
-
-
 static void __option_byte_config(void)
 {
     FLASH_Unlock();

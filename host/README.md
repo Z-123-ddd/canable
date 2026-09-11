@@ -26,25 +26,56 @@ source /d/Qt/qt-tools-env.sh          # 或 cmd: call D:\Qt\qt-tools-env.bat
 cd host
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=D:/Qt/6.8.3/mingw_64
 cmake --build build
-# 产物: host/build/canable2_host.exe
+# 产物: host/build/CyberBeast-CANable2.exe
 ```
 
 运行需要 Qt DLL 与 `libusb-1.0.dll`（构建后自动拷到 exe 同目录）：
 ```bash
-./build/canable2_host.exe
+./build/CyberBeast-CANable2.exe
 ```
 
 无头自检：
 ```bash
-./build/canable2_host.exe --selftest     # 协议编解码自检
-./build/canable2_host.exe --uitest       # 界面逻辑自检（含传输切换）
-./build/canable2_host.exe --guitest      # GUI 烧机自检：打开主窗口→短暂运行→自动关闭退出
-./build/canable2_host.exe --usb-open     # 枚举 libusb 设备并尝试打开
-./build/canable2_host.exe --dfu-scan     # 枚举 USB 设备(读 DFU 设备 VID/PID)
+./build/CyberBeast-CANable2.exe --selftest     # 协议编解码自检
+./build/CyberBeast-CANable2.exe --uitest       # 界面逻辑自检（含传输切换）
+./build/CyberBeast-CANable2.exe --guitest      # GUI 烧机自检：打开主窗口→短暂运行→自动关闭退出
+./build/CyberBeast-CANable2.exe --usb-open     # 枚举 libusb 设备并尝试打开
+./build/CyberBeast-CANable2.exe --dfu-scan       # 枚举 USB 并判断 DFU 设备是否在线
+./build/CyberBeast-CANable2.exe --dfu-selftest   # DFU(DfuSe) 编码/布局解析离线自测
 ```
 
 > libusb 路径需设备的驱动为 WinUSB/libusbK（可用 [Zadig](https://zadig.akeo.ie/) 安装）。
 > 装成 libusb 驱动后该设备不再有 COM 口，此时在「传输」里选 `USB(libusb)`。
+
+## USB 更新固件 (DFU)
+
+「更新固件」流程：经当前连接发送命令 5（`ENTER_DFU`）→ MCU 跳入 N32 出厂 bootloader →
+USB 重新枚举为 **DFU 设备 `0x19F5:0x4537`（"N32-BOOTLOADER"）** → 弹出对话框烧录 `.bin`
+到 `0x08000000`，成功后自动跳转运行新固件。
+
+- 固件侧跳转见仓库 `docs/FIRMWARE_PROTOCOL.md` §9（向量表在 SRAM 顶 `0x2002FE00`）。
+- **烧录由厂商 32 位 `NsMcuCmdDll.dll` 完成**（协议组帧/CRC 都在 DLL 内部，无需自行实现）。
+  因上位机是 64 位、无法同进程加载该 DLL，故随包分发一个 32 位 CLI
+  `vendor_dfu/nsi_dfu_flash.exe`，由 `src/VendorDfuFlasher.cpp` 用 QProcess 调用：
+  `ENUM → CONNECT → GET_INF → FLASH_ERASE → FLASH_DWNLD → APP_GO`。
+  关键：`NS_Dl_File.+0x08` 是**数据指针**（不是 CRC），`FLASH_DWNLD` 的 `a2..a5` 传 `NULL`。
+- 若 `vendor_dfu/` 缺失，自动回退到 `src/dfu_device.cpp` 的 libusb DfuSe 实现。
+- Windows 需安装厂商签名驱动 **NationstechDFU**（安装包「DFU 驱动」可选组件，`pnputil` 注册）；
+  否则 32 位 DLL 打不开 DFU 设备。
+- 无头验证：`CyberBeast-CANable2.exe --vendor-flash <bin> [addr]`。
+
+## 串口显示名（可选品牌化驱动）
+
+设备是标准 USB CDC-ACM（`bDeviceClass=0x02/SubClass=0x02`），Win10/11 内置 `usbser.inf`
+已能自动装 `usbser.sys` 并分配 COM 口 —— **不装任何驱动即可当 CAN 用**，只是端口显示为
+系统默认的 “USB Serial Device”。
+
+安装包里的**可选组件「品牌串口驱动 (CyberBeast USB2CAN)」**会把端口显示名改为
+**“CyberBeast USB2CAN (COMx)”**。它由 `installer/drivers/CyberBeast_USB2CAN/` 提供
+（`CyberBeast_USB2CAN.inf` + 签名 `.cat` + 自签名证书 `.cer`），安装时用 `certutil` 把证书
+装入本机受信任存储、再 `pnputil /add-driver` 注册；**需管理员**。详见该目录下 `README.md`。
+
+> 注意：CD 串口驱动与 DFU 驱动是**两个独立组件**，互不影响。
 
 ## 打包安装程序 (NSIS)
 

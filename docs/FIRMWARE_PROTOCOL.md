@@ -72,7 +72,7 @@ ID 字节数由当前 **ID 格式配置**决定（默认标准 11-bit）：
 | STANDARD（默认） | 2 | 11-bit | ID 以 2 字节大端承载 |
 | EXTENDED | 4 | 29-bit | ID 以 4 字节大端承载 |
 
-> ⚠️ ID 格式当前**只能通过 API 切换**（`can_set_id_format()`），尚无对应 USB 命令；同一时刻只能解析一种格式。
+> ⚠️ ID 格式当前**固定为 STANDARD**（11-bit）；尚无对应 USB 命令，同一时刻只能解析一种格式。
 
 ### 4.2 CTRL 控制字节
 
@@ -125,7 +125,7 @@ ID 字节数由当前 **ID 格式配置**决定（默认标准 11-bit）：
   - pending 为空（数据未变、仅发命令）→ **沿用上次播放列表**；
   - SINGLE = 列表按 FIFO 发一遍即停；CONTINUOUS = 按定时器间隔循环发整个列表。
 
-> 发送模式可用命令 7（`SET_MODE`）在运行时切换（默认单帧），定时器周期可用命令 6（`SET_INTERVAL`）设置（默认 1ms）。仅 ID 格式当前仍**只有预留 API**（`can_set_id_format()`），尚无 USB 命令码。
+> 发送模式可用命令 7（`SET_MODE`）在运行时切换（默认单帧），定时器周期可用命令 6（`SET_INTERVAL`）设置（默认 1ms）。ID 格式固定为 STANDARD（11-bit）。
 
 **定时器发送**：周期发送由 GTIM1 驱动，一旦启动即从 RAM 取帧，**不依赖 USB 持续喂数据**（上位机只需发一次数据+一次 `TX_START`）。
 
@@ -173,12 +173,46 @@ GET_STATUS 的 `err` 字段为 32 位错误寄存器的低 8 位十六进制，�
 
 ---
 
-## 9. DFU 下载（命令 5）
+## 9. DFU 下载（USB 更新固件，命令 5）
 
+### 9.1 进入 DFU（MCU 侧，已实现 `src/dfu.c`)
 1. 主机发 `AA AA 05 00 00 00 00`。
-2. MCU 停止发送任务与定时器，切 HSI 时钟，跳入 N32 出厂 bootloader（`0x1FFF01A1`）。
-3. MCU **不再返回**；USB 设备重新枚举为 N32 DFU 设备。
-4. 主机用 N32 DFU 下载工具烧写新固件。
+2. MCU 停止发送任务与定时器；`dfu_enter_bootloader()` 执行：
+   - 关闭并复位 Flash iCache；
+   - 探测 bootloader 版本（`Get_NVR`，`0x1FFF02A5`）；
+   - 在 **SRAM 顶部 - 0x200** 处重建 128 字向量表，重定向 SysTick/USART3/USB_FS 到 boot 代码；
+   - `__disable_irq()`，重装并冻结 IWDG；
+   - 系统时钟切回 HSI（`RCC_DeInit` + HSI，`FLASH_SetLatency` 0）；
+   - `SCB->VTOR = 向量表地址`，`__set_MSP(SPAddr)`，跳 `0x1FFF01A1`（V1.1 用 `SPAddr=0x200024C0`）。
+
+> 向量表地址 = `0x20000000 + SRAM_SIZE - 0x200`，**`SRAM_SIZE` 按具体芯片**（官方应用笔记
+> `AN_N32H47x_48x_Jump_to_BOOT` V1.1.0）。本板 **N32H473CE = 160KB SRAM + 32KB CCM = 192KB**
+> → 向量表在 **`0x2002FE00`**（`src/dfu.c` 同时兼容参考地址 `0x20023E00`）。
+
+3. MCU **不再返回**；USB 设备重新枚举为 **DFU 设备**。
+
+### 9.2 主机侧（USB 识别与烧录）
+- N32 出厂 bootloader 在 USB-FS 上枚举为 **VID/PID = `0x19F5:0x4537`**（"NationstechDFU Device"，设备名
+  `Nationstech DFU`）。**注意不是 ST 的 `0x0483:0xDF11`/"STM32 BOOTLOADER"** —— N32 用自己的 ID。
+- **Windows 必须装厂商签名驱动 `NationstechDFU`**（`host/installer/drivers/NationstechDFU/`，用
+  `pnputil /add-driver ... /install` 注册）。**不要用 Zadig 把它装成 WinUSB/libusb** ——
+  一个 USB 设备同一时刻只能绑一个内核驱动，装成 libusb 后厂商烧录 DLL 反而打不开它。
+- **烧录由厂商 32 位 `NsMcuCmdDll.dll` 完成**（协议组帧/CRC 都在 DLL 内部，非 DfuSe 标准协议）。
+  上位机 64 位无法同进程加载该 DLL，故随包分发 32 位 CLI `host/vendor_dfu/nsi_dfu_flash.exe`，
+  由 `host/src/VendorDfuFlasher.cpp` 用 QProcess 调用：
+  `ENUM → CONNECT → GET_INF → FLASH_ERASE → FLASH_DWNLD → APP_GO`，全部成功返回 `0xA000`。
+  关键坑：`NS_Dl_File.+0x08` 是**数据指针**（不是 CRC）；`FLASH_DWNLD` 的 `a2..a5` 传 `NULL`。
+  跳转运行由 `APP_GO` 完成，无需自行发送 Leave。
+- 设备匹配：`kDfuVid=0x19F5 / kDfuPid=0x4537`（`host/src/dfu_device.h`）。
+- `host/src/dfu_device.cpp`（libusb DfuSe 自实现）仅作**回退**保留：它要求设备绑定 WinUSB/libusb，
+  与 `NationstechDFU` 互斥，正常装机场景下不会用到。
+- 点「更新固件」：先经当前连接发命令 5 → 轮询 DFU 设备（libusb 枚举）→ 打开固件对话框 →
+  由厂商 DLL 烧录。
+
+### 9.3 验证
+- `CyberBeast-CANable2.exe --dfu-selftest`：DfuSe 命令编码 / 内存布局解析 / 扇区计算（无硬件）。
+- `CyberBeast-CANable2.exe --dfu-scan`：枚举 USB 并判断 DFU 设备是否在线。
+- `CyberBeast-CANable2.exe --vendor-flash <bin> [addr]`：无头走厂商 DLL 烧录（需设备已在 DFU 模式）。
 
 ---
 
@@ -254,9 +288,9 @@ AA AA 05 00 00 00 00
 
 | API | 作用 |
 |---|---|
-| `can_set_id_format()` / `can_get_id_format()` | 切换标准/扩展 ID 宽度（影响数据帧 ID 字节数） |
+| `can_get_id_format()` | 读取当前 ID 格式（当前固定 STANDARD） |
 | `can_timer_enable()` / `can_timer_disable()` | 软件门控周期发送 |
-| `can_tx_start()/stop()/job_running()` | 直接触发/停止发送任务（命令 2/3 的内部实现） |
+| `can_tx_start()` / `can_tx_stop()` | 直接触发/停止发送任务（命令 2/3 的内部实现） |
 
 ---
 

@@ -137,11 +137,6 @@ uint32_t can_dlc_code_to_hal_dlc(uint8_t dlc_code)
 
 // ---- Binary USB protocol configuration (ID width) ----
 
-void can_set_id_format(can_id_format_t fmt)
-{
-    can_id_format = fmt;
-}
-
 can_id_format_t can_get_id_format(void)
 {
     return can_id_format;
@@ -177,22 +172,6 @@ void can_init(void)
 
     GPIO_InitType gpio;
     GPIO_InitStruct(&gpio);
-
-    // CAN Standby pin (PA0) - turn standby off (active low)
-    // gpio.Pin = GPIO_PIN_0;
-    // gpio.GPIO_Mode = GPIO_MODE_OUTPUT_PP;
-    // gpio.GPIO_Pull = GPIO_PULL_DOWN;
-    // gpio.GPIO_Slew_Rate = GPIO_SLEW_RATE_SLOW;
-    // gpio.GPIO_Current = GPIO_DC_2mA;
-    // gpio.GPIO_Alternate = 0;
-    // GPIO_InitPeripheral(GPIOA, &gpio);
-    // GPIO_WriteBits(GPIOA, GPIO_PIN_0, Bit_RESET); // STB = low (active)
-
-    // CAN IO power (PC13) - enable CAN transceiver power
-    // gpio.Pin = GPIO_PIN_13;
-    // gpio.GPIO_Pull = GPIO_PULL_DOWN;
-    // GPIO_InitPeripheral(GPIOC, &gpio);
-    // GPIO_WriteBits(GPIOC, GPIO_PIN_13, Bit_SET);  // Power ON
 
     // FDCAN1_RX on PB12 (AF26), FDCAN1_TX on PB13 (AF25)
     // Note: N32 FDCAN1 TX and RX use DIFFERENT alternate function numbers!
@@ -580,7 +559,6 @@ static void can_scan_switch(uint8_t idx, uint32_t now)
 {
     uint32_t hz = can_bitrate_to_hz(can_scan_rates[idx]);
     can_apply_bitrate_hz(hz);          // hot reconfig; TX cache is preserved
-    current_bitrate_hz = hz;
     scan_win_start = now;
     scan_win_base  = rx_frame_count;
 }
@@ -642,36 +620,6 @@ int32_t can_scan_take_lock(void)
     __enable_irq();
     return hz;
 }
-
-uint32_t can_get_bitrate_hz(void)
-{
-    return current_bitrate_hz;
-}
-
-
-// Set CAN peripheral to silent mode
-void can_set_silent(uint8_t silent)
-{
-    if (bus_state == ON_BUS) return;
-
-    if (silent) {
-        can_handle.Mode = FDCAN_MODE_BUS_MONITORING;
-    } else {
-        can_handle.Mode = FDCAN_MODE_NORMAL;
-    }
-    led_green_on();
-}
-
-
-// Enable/disable automatic retransmission
-void can_set_autoretransmit(uint8_t autoretransmit)
-{
-    if (bus_state == ON_BUS) return;
-
-    can_autoretransmit = autoretransmit;
-    led_green_on();
-}
-
 
 // ---------------------------------------------------------------------------
 // TX engine: single-shot vs continuous (periodic) sending.
@@ -800,13 +748,6 @@ void can_tx_stop(void)
     can_timer_disable();
 }
 
-// True while a periodic TX job is running.
-uint8_t can_tx_job_running(void)
-{
-    return tx_job_active;
-}
-
-
 // Drain the FDCAN hardware Rx FIFO 0 into the software RX queue.
 // Called from the FDCAN1_INT0 ISR only (single producer).
 // If the software ring is full the OLDEST queued frame is overwritten.
@@ -877,10 +818,6 @@ uint8_t is_can_msg_pending(uint8_t fifo)
 }
 
 
-// Periodic pump, invoked by the GTIM1 timer ISR at the configured interval.
-// Only acts while a periodic TX job is active (see can_tx_start CONTINUOUS):
-// re-send the cached 'most recent frame'. A SINGLE job is fired directly in
-// can_tx_start and never activates the timer pump.
 // Periodic pump, invoked by the GTIM1 timer ISR at the configured interval.
 // Only acts while a TX job is active (see can_tx_start):
 //   single-frame mode  -> re-send the cached 'most recent frame'

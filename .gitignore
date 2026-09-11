@@ -4,3 +4,9 @@ MDK-ARM/Listings/
 MDK-ARM/*.uvguix.*
 MDK-ARM/JLink*
 host/build/
+
+# MSVC / helper build artifacts
+*.obj
+
+# 免安装包解压目录（其 zip 已入库，目录可随时解压还原）
+host/dist/*-portable/

@@ -1,0 +1,95 @@
+;
+; NationstechDFU.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USBDevice
+ClassGuid={88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider=%ManufacturerName%
+CatalogFile=NationstechDFU.cat
+DriverVer = 08/22/2020,19.46.22.6
+
+[DestinationDirs]
+DefaultDestDir = 12
+NationstechDFU_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+NationstechDFU.sys  = 1,,
+;
+
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTx86,NTamd64
+
+[Standard.NTx86]
+%NationstechDFU.DeviceDesc%=NationstechDFU_Device, USB\%DeviceID%
+
+[Standard.NTamd64]
+%NationstechDFU.DeviceDesc%=NationstechDFU_Device, USB\%DeviceID%
+
+[NationstechDFU_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+NationstechDFU.sys
+
+[NationstechDFU_Device.NT.HW]
+AddReg=NationstechDFU_AddReg
+
+[NationstechDFU_AddReg]
+; By default, USBDevice class uses iProduct descriptor to name the device in
+; Device Manager on Windows 8 and higher.
+; Uncomment for this device to use %DeviceName% on Windows 8 and higher:
+;HKR,,FriendlyName,,%NationstechDFU.DeviceDesc%
+
+;-------------- Service installation
+[NationstechDFU_Device.NT.Services]
+AddService = NationstechDFU,%SPSVCINST_ASSOCSERVICE%, NationstechDFU_Service_Inst
+
+; -------------- NationstechDFU driver install sections
+[NationstechDFU_Service_Inst]
+DisplayName    = %NationstechDFU.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\NationstechDFU.sys
+
+;
+;--- NationstechDFU_Device Coinstaller installation ------
+;
+
+[NationstechDFU_Device.NT.CoInstallers]
+AddReg=NationstechDFU_Device_CoInstaller_AddReg
+CopyFiles=NationstechDFU_Device_CoInstaller_CopyFiles
+
+[NationstechDFU_Device_CoInstaller_AddReg]
+;
+
+
+[NationstechDFU_Device_CoInstaller_CopyFiles]
+;
+
+
+[NationstechDFU_Device.NT.Wdf]
+KmdfService =  NationstechDFU, NationstechDFU_wdfsect
+[NationstechDFU_wdfsect]
+KmdfLibraryVersion = 1.15
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+ClassName="Universal Serial Bus devices"
+DiskName = "NationstechDFU Installation Disk"
+NationstechDFU.DeviceDesc = "NationstechDFU Device"
+NationstechDFU.SVCDESC = "NationstechDFU Service"
+REG_MULTI_SZ = 0x00010000
+DeviceID   = "VID_19F5&PID_4537"
+DeviceGUID = "{2BC34ECC-E17F-41E8-B6E7-FD0B182B4A64}"

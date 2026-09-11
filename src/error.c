@@ -22,13 +22,6 @@ void error_assert(error_t err)
 }
 
 
-// Get timestamp of a specific error
-uint32_t error_timestamp(error_t err)
-{
-    return error_timestamps[err];
-}
-
-
 // Get timestamp of the most recent error
 uint32_t error_last_timestamp(void)
 {
@@ -39,13 +32,6 @@ uint32_t error_last_timestamp(void)
             latest = error_timestamps[i];
     }
     return latest;
-}
-
-
-// Check if a specific error has occurred
-uint8_t error_occurred(error_t err)
-{
-    return (error_register & (1 << err)) ? 1 : 0;
 }
 
 

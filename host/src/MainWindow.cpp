@@ -102,7 +102,7 @@ static int tallerHeight(const QWidget *w, int lines = 1)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle(QStringLiteral("CANable2-N32 上位机"));
+    setWindowTitle(QStringLiteral("CyberBeast CANable 2"));
 
     auto *central = new QWidget(this);
     auto *root = new QHBoxLayout(central);       // 左右布局

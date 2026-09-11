@@ -8,10 +8,16 @@
 #######################################
 
 # SOURCES: list of sources in the user application
-SOURCES = main.c system.c system_n32h47x_48x.c can.c can_timer.c can_frame_list.c dfu.c usb_proto.c led.c error.c printf.c interrupts.c usbd_cdc_if.c usb_istr.c usb_desc.c usb_prop.c usb_pwr.c usb_endp.c
+SOURCES = main.c system.c system_n32h47x_48x.c can.c can_timer.c can_frame_list.c dfu.c usb_proto.c led.c error.c interrupts.c usbd_cdc_if.c usb_istr.c usb_desc.c usb_prop.c usb_pwr.c usb_endp.c
 
-# Get git version and dirty flag
-GIT_VERSION := $(shell git describe --abbrev=7 --dirty --always --tags)
+# Firmware version (mirrored in inc/git_version.h for the Keil build)
+FW_VERSION := v1.1.1
+
+# Git revision (short hash + dirty flag) for build identification
+GIT_REV := $(shell git describe --abbrev=7 --dirty --always --tags)
+
+# Combined version string reported by the firmware
+GIT_VERSION := $(FW_VERSION)-$(GIT_REV)
 
 # Get git remote URL
 GIT_REMOTE := $(shell git config --get remote.origin.url | sed 's/^.*github/github/')

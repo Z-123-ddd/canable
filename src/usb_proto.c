@@ -427,14 +427,6 @@ void usb_proto_feed(uint8_t byte)
 }
 
 
-void usb_proto_reset(void)
-{
-    state = PROTO_IDLE;
-    rxlen = 0;
-    need = 0;
-}
-
-
 // Emit the "bitrate locked" response frame (MCU -> host): AA AC 01 | hz[4] LE.
 // Called (indirectly, via the main loop) when the auto-bitrate scan locks.
 void usb_proto_send_bitrate_lock(uint32_t hz)

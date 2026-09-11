@@ -14,7 +14,6 @@
 #include "usb_conf.h"
 #include "usbd_cdc_if.h"
 #include "usb_proto.h"
-#include "system.h"
 #include "error.h"
 
 // Private variables
@@ -29,10 +28,6 @@ void cdc_tx_done(void)
 {
     tx_active = 0;
 }
-
-
-// Forward declarations
-void USB_ProcessNop(void);
 
 
 // USB device initialization

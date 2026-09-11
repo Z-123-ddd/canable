@@ -1,4 +1,5 @@
 #include "FirmwareDialog.h"
+#include "VendorDfuFlasher.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -24,9 +25,17 @@ FlashWorker::FlashWorker(const QString &path, quint32 addr, QObject *parent)
 void FlashWorker::run()
 {
     QString err;
-    bool ok = dfu::flashBin(m_path, m_addr, &err, [this](int pct, const QString &stage) {
-        emit progress(pct, stage);
-    });
+    bool ok;
+    if (vendorDfu::available()) {
+        ok = vendorDfu::flash(m_path, m_addr, &err, [this](int pct, const QString &stage) {
+            emit progress(pct, stage);
+        });
+    } else {
+        // 兜底：自实现 libusb DfuSe 路径
+        ok = dfu::flashBin(m_path, m_addr, &err, [this](int pct, const QString &stage) {
+            emit progress(pct, stage);
+        });
+    }
     emit finished(ok, err);
 }
 

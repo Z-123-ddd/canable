@@ -16,8 +16,8 @@
 #include "usb_proto.h"
 #include "led.h"
 #include "error.h"
-#include "printf.h"
 #include "usbd_cdc_if.h"
+#include "dfu.h"
 
 // Firmware identification (kept for future reporting commands)
 char* fw_id = GIT_VERSION " " GIT_REMOTE "\r";
@@ -25,6 +25,11 @@ char* fw_id = GIT_VERSION " " GIT_REMOTE "\r";
 
 int main(void)
 {
+    // If a DFU jump was requested (host command 5 set the cookie then reset
+    // the chip), jump into the bootloader NOW - before any peripheral/clock
+    // init - so its USB DFU enumerates from a clean reset state.
+    dfu_bootloader_if_pending();
+
     // Initialize peripherals
     system_init();
     can_init();

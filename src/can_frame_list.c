@@ -38,14 +38,6 @@ void can_frame_list_init(void)
 }
 
 
-// Start a new burst: the previous pending content is discarded. The active
-// (committed) list is left untouched until the next commit.
-void can_frame_list_pending_clear(void)
-{
-    pending_count = 0;
-}
-
-
 // Append one frame to the pending burst.
 // Returns 0 on success, -1 if the list is full or the arguments are invalid.
 int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,

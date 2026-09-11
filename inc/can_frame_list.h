@@ -35,7 +35,6 @@ typedef struct {
 void can_frame_list_init(void);
 
 // ---- pending (host data frames accumulate here) ----
-void    can_frame_list_pending_clear(void);          // start a new burst
 int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,
                                    const uint8_t *data); // -1 if full/invalid
 uint16_t can_frame_list_pending_count(void);

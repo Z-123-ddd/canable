@@ -24,7 +24,6 @@
 
 // Prototypes
 void can_timer_init(void);              // configure & start GTIM1 (always running)
-void can_timer_set_enabled(uint8_t enabled);  // legacy master-switch setter
 uint8_t can_timer_is_enabled(void);
 void can_timer_set_period_ms(uint32_t period_ms);  // clamp to >= 1ms
 

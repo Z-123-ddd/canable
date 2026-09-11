@@ -116,11 +116,8 @@ void can_enable(void);
 void can_disable(void);
 void can_set_bitrate(enum can_bitrate bitrate);
 void can_set_data_bitrate(enum can_data_bitrate bitrate);
-void can_set_silent(uint8_t silent);
-void can_set_autoretransmit(uint8_t autoretransmit);
 
 // Binary-protocol configuration
-void can_set_id_format(can_id_format_t fmt);          // default: standard
 can_id_format_t can_get_id_format(void);
 void can_set_send_mode(can_send_mode_t mode);         // default: single frame
 can_send_mode_t can_get_send_mode(void);
@@ -140,8 +137,6 @@ void can_scan_poll(void);
 // One-shot: returns the locked nominal bitrate (Hz) exactly once after a lock,
 // then -1. Consumed by the main loop to emit the AA AC report.
 int32_t can_scan_take_lock(void);
-// Current nominal bitrate (Hz).
-uint32_t can_get_bitrate_hz(void);
 
 // Convert a raw DLC code (0..15, incl. CAN FD codes) to an FDCAN HAL DLC code
 uint32_t can_dlc_code_to_hal_dlc(uint8_t dlc_code);
@@ -167,8 +162,6 @@ void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data);
 int32_t can_tx_start(can_tx_trigger_t trigger);
 // Abort any running TX job (stops the periodic pump).
 void can_tx_stop(void);
-// True while a periodic TX job is running.
-uint8_t can_tx_job_running(void);
 // Format a one-line ASCII status report (host GET_STATUS command).
 // Writes at most max-1 bytes + NUL; returns the length.
 uint16_t can_format_status(char *buf, uint16_t max);

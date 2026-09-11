@@ -6,7 +6,6 @@
 #include "n32h47x_48x.h"
 #include "n32h47x_48x_conf.h"
 #include "interrupts.h"
-#include "led.h"
 #include "can.h"
 #include "can_timer.h"
 

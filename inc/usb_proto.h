@@ -103,8 +103,6 @@
 // ---- API ----
 // Feed one received byte (called from the CDC process loop)
 void usb_proto_feed(uint8_t byte);
-// Drop any partially received frame and resynchronise on the next header
-void usb_proto_reset(void);
 
 // Encode one RECEIVED CAN/FD frame (bus -> USB) into the SAME binary layout
 // the host uses to send data:  AA AB | ID | CTRL | DATA | CRC.

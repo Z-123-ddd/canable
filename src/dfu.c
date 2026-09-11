@@ -44,6 +44,13 @@ static const uint32_t SRAM_VECTOR_ADDRS[] = {
 /* VTOR handed to the boot ROM: the largest candidate table. */
 static const uint32_t SRAM_VECTOR_TARGET = 0x2002FE00u;
 
+/* --- DFU request cookie (survives a soft reset; lives above the app image) ---
+ * The app linker uses only 0x20000000..0x20020000 (128KB); this chip has RAM up
+ * to 0x20030000, so 0x2002FC00 is free and is NOT zeroed by the C runtime.
+ * 0x2002FC00 < vector table start 0x2002FE00, so it does not clash either. */
+#define DFU_COOKIE_ADDR   ((volatile uint32_t *)0x2002FC00u)
+#define DFU_COOKIE_MAGIC  0x44465521u   /* 'D','F','U','!' */
+
 static uint32_t BootAddr  = 0x1FFF01A1u;        /* bootloader entry */
 static uint32_t SPAddr    = 0x200024A8u;        /* boot stack (V1.0)  */
 
@@ -184,13 +191,40 @@ static void dfu_jump_to_boot(void)
 
 
 /**
- * @brief  Public API: switch to the DFU bootloader.
- *         Never returns on success.
+ * @brief  Public API used by the ENTER_DFU command: mark a pending DFU jump
+ *         and reset the chip. The actual jump runs from the clean reset state
+ *         in main() (dfu_bootloader_if_pending). Never returns.
  */
 void dfu_enter_bootloader(void)
 {
-    dfu_jump_to_boot();
-    /* Not reached on success. Keep the compiler / watchdog honest. */
+    *DFU_COOKIE_ADDR = DFU_COOKIE_MAGIC;
+    /* Ensure the cookie write reaches SRAM before the reset. */
+    __DSB();
+    __disable_irq();
+    NVIC_SystemReset();
+    /* Not reached. */
+    for (;;)
+        ;
+}
+
+
+/**
+ * @brief  Run the DFU jump if one was requested before the last reset.
+ *         Call at the very start of main(), before any peripheral init, so
+ *         the bootloader starts from a reset-state clock/peripheral config
+ *         (this is what makes its USB DFU enumerate). Returns if no jump is
+ *         pending.
+ */
+void dfu_bootloader_if_pending(void)
+{
+    if (*DFU_COOKIE_ADDR != DFU_COOKIE_MAGIC)
+        return;
+
+    /* Clear the cookie first so a failed jump cannot cause a reset loop. */
+    *DFU_COOKIE_ADDR = 0;
+    __DSB();
+
+    dfu_jump_to_boot();   /* never returns on success */
     for (;;)
         ;
 }

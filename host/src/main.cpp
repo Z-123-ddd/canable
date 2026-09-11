@@ -20,6 +20,7 @@
 #include "MainWindow.h"
 #include "Protocol.h"
 #include "dfu_device.h"
+#include "VendorDfuFlasher.h"
 #include "UsbLink.h"
 
 // 无头 UI 逻辑自测：
@@ -224,6 +225,52 @@ static int runUiTest()
     return ok ? 0 : 1;
 }
 
+// DFU 离线自检：校验 DfuSe 命令编码 / 内存布局解析 / 扇区计算（无硬件依赖）
+static int runDfuSelfTest()
+{
+    int fail = 0;
+    auto check = [&](bool c, const QString &name) {
+        std::fputs(QStringLiteral("%1 %2\n").arg(c ? "[ok]  " : "[FAIL]").arg(name)
+                       .toLocal8Bit().constData(), stdout);
+        if (!c) fail++;
+    };
+
+    // DfuSe 特殊命令编码
+    check(dfu::encodeSetAddress(0x08000000) == QByteArray::fromHex("2100000008"),
+          QStringLiteral("set-address 0x08000000 -> 21 00 00 00 08"));
+    check(dfu::encodeErase(0x08010000) == QByteArray::fromHex("4100000108"),
+          QStringLiteral("erase 0x08010000 -> 41 00 00 01 08"));
+
+    // 内存布局解析（示例串取自 DFU alt-setting）
+    quint32 base = 0;
+    const QString layout = QStringLiteral("@Internal Flash  /0x08000000/04*016Kg,01*064Kg,03*128Kg");
+    const QList<dfu::Sector> secs = dfu::parseLayout(layout, &base);
+    check(base == 0x08000000, QStringLiteral("base=0x08000000"));
+    check(secs.size() == 8, QStringLiteral("扇区数=8"));
+    check(!secs.isEmpty() && secs[0].len == 0x4000 && secs[4].len == 0x10000
+              && secs[5].len == 0x20000,
+          QStringLiteral("扇区大小 16K/64K/128K"));
+    quint32 total = 0;
+    for (const dfu::Sector &s : secs) total += s.len;
+    check(total == 0x80000, QStringLiteral("总容量 = 512KB"));
+
+    // 非 Internal Flash 名应被忽略
+    quint32 b2 = 0;
+    check(dfu::parseLayout(QStringLiteral("@Option Bytes /0x1FFFF800/01*016 g"), &b2).isEmpty(),
+          QStringLiteral("非 Internal Flash 名 -> 空表"));
+
+    // 块大小 = gcd(扇区, 2048)
+    check(dfu::transferSize(0x4000) == 2048, QStringLiteral("transferSize(16K)=2048"));
+    check(dfu::transferSize(0x100) == 256,  QStringLiteral("transferSize(256)=256"));
+
+    // 覆盖计算：20184 字节从 0x08000000 -> 扇区0(16K)+扇区1
+    const QList<dfu::Sector> cov = dfu::sectorsCovering(secs, 0x08000000, 20184);
+    check(cov.size() == 2, QStringLiteral("20184B 覆盖 2 个扇区"));
+
+    std::fputs(fail == 0 ? "DFU-SELFTEST: ALL PASS\n" : "DFU-SELFTEST: FAILURES\n", stdout);
+    return fail == 0 ? 0 : 1;
+}
+
 int main(int argc, char *argv[])
 {
     // 协议自检：host.exe --selftest  （不开窗口，跑完即退）
@@ -237,8 +284,52 @@ int main(int argc, char *argv[])
         }
     }
 
+    // DFU 离线自检：host.exe --dfu-selftest
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--dfu-selftest")
+            return runDfuSelfTest();
+    }
+
+    // DFU 协议探针：host.exe --dfu-probe
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--dfu-probe") {
+            std::fputs(dfu::probeDfu().toLocal8Bit().constData(), stdout);
+            return 0;
+        }
+    }
+
+    // DFU 设备描述符 dump：host.exe --dfu-info
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--dfu-info") {
+            std::fputs(dfu::describeDevice().toLocal8Bit().constData(), stdout);
+            return 0;
+        }
+    }
+
+    // DFU 烧录测试：host.exe --dfu-flash <bin> [addr]
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--dfu-flash") {
+            QString path;
+            quint32 addr = 0x08000000;
+            if (i + 1 < argc) path = QString::fromLocal8Bit(argv[i + 1]);
+            if (i + 2 < argc) addr = QString::fromLocal8Bit(argv[i + 2]).toUInt(nullptr, 0);
+            if (path.isEmpty()) { std::fputs("usage: --dfu-flash <bin> [addr]\n", stdout); return 2; }
+            std::fputs(QStringLiteral("flashing %1 -> 0x%2 ...\n").arg(path)
+                           .arg(addr, 8, 16, QLatin1Char('0')).toLocal8Bit().constData(), stdout);
+            QString err;
+            bool ok = dfu::flashBin(path, addr, &err,
+                                    [](int p, const QString &s) {
+                                        std::fputs(QStringLiteral("  %1%  %2\n").arg(p).arg(s)
+                                                       .toLocal8Bit().constData(), stdout);
+                                    });
+            if (!ok) std::fputs(("  ERR: " + err + "\n").toLocal8Bit().constData(), stdout);
+            std::fputs(ok ? "DFU-FLASH: OK\n" : "DFU-FLASH: FAIL\n", stdout);
+            return ok ? 0 : 1;
+        }
+    }
+
     QApplication app(argc, argv);
-    QApplication::setApplicationName("CANable2 Host");
+    QApplication::setApplicationName("CyberBeast CANable 2");
     QApplication::setOrganizationName("CANable2-N32");
 
     // 整体字号放大两号
@@ -249,6 +340,26 @@ int main(int argc, char *argv[])
             ps = 9;   // 部分平台 font() 返回像素单位，给一个合理基准
         f.setPointSize(ps + 2);
         app.setFont(f);
+    }
+
+    // 厂商 DLL 路径烧录测试（QApplication 之后以取到 exe 目录）：host.exe --vendor-flash <bin> [addr]
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--vendor-flash") {
+            QString path;
+            quint32 addr = 0x08000000;
+            if (i + 1 < argc) path = QString::fromLocal8Bit(argv[i + 1]);
+            if (i + 2 < argc) addr = QString::fromLocal8Bit(argv[i + 2]).toUInt(nullptr, 0);
+            if (path.isEmpty()) { std::fputs("usage: --vendor-flash <bin> [addr]\n", stdout); return 2; }
+            std::fputs(QStringLiteral("vendor_dfu available: %1\n")
+                           .arg(vendorDfu::available() ? "yes" : "no").toLocal8Bit().constData(), stdout);
+            QString err;
+            bool ok = vendorDfu::flash(path, addr, &err, [](int p, const QString &s) {
+                std::fputs(QStringLiteral("  %1%  %2\n").arg(p).arg(s).toLocal8Bit().constData(), stdout);
+            });
+            if (!ok) std::fputs(("  ERR: " + err + "\n").toLocal8Bit().constData(), stdout);
+            std::fputs(ok ? "VENDOR-FLASH: OK\n" : "VENDOR-FLASH: FAIL\n", stdout);
+            return ok ? 0 : 1;
+        }
     }
 
     // 无头逻辑自测：host.exe --uitest
