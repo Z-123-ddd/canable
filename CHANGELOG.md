@@ -1,5 +1,12 @@
 # 更新日志 (CHANGELOG) — CyberBeast CANable 2 上位机
 
+## 未发布 (Unreleased) — CANopen：执行 PDO 映射修改后，PDO 传输区同步
+
+- 发送「★ PDO 映射修改」示例后，把新映射同步到对应 PDO 的**传输区**（会话缓存 `m_coPdoCache`）；
+  之后切到该 PDO 的传输功能即按**修改后的映射**显示（索引仍只读、数值可填）。
+
+---
+
 ## 未发布 (Unreleased) — CANopen：PDO 索引不可选（仅默认映射显示，会话记忆，重开恢复默认）
 
 - RPDO/TPDO 参数区的**映射对象索引不可选**，仅按**默认映射**只读显示；数值可填。

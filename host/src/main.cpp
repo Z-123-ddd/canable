@@ -631,6 +631,42 @@ static int runUiTest()
         }
     }
     ok = ok && pdoOk;
+
+    // ---- PDO 映射修改 → PDO 传输区同步 ----
+    bool mapSyncOk = false;
+    {
+        if (auto *a = w.findChild<QAction *>(QStringLiteral("actionProtoOpen"))) a->trigger();
+        auto *funcBox = w.findChild<QComboBox *>(QStringLiteral("coFuncBox"));
+        int mapRow = -1;
+        for (int r = 0; funcBox && r < funcBox->count(); ++r) {
+            const QVariant v = funcBox->itemData(r, Qt::UserRole + 1);
+            if (v.isValid() && canopen::examples().at(v.toInt()).name.contains(QStringLiteral("映射修改"))) mapRow = r;
+        }
+        mapSyncOk = funcBox && mapRow >= 0;
+        if (mapSyncOk) {
+            funcBox->setCurrentIndex(mapRow);              // 映射修改示例
+            auto *pdoBox = w.findChild<QComboBox *>(QStringLiteral("coMapPdoBox"));
+            mapSyncOk = pdoBox != nullptr;
+            if (mapSyncOk) {
+                pdoBox->setCurrentIndex(pdoBox->findData((int)canopen::F_TPDO1));  // 目标 PDO = TPDO1
+                QCoreApplication::processEvents();          // 触发延迟重建
+                auto *o0 = w.findChild<QComboBox *>(QStringLiteral("coMapObj0"));
+                mapSyncOk = o0 != nullptr;
+                int k = -1;
+                for (int j = 0; o0 && j < o0->count(); ++j)
+                    if (o0->itemData(j).toUInt() == ((0x6064u << 8) | 0)) k = j;   // 换成 6064h
+                if (k >= 0) o0->setCurrentIndex(k);
+                w.coSyncTransmitFromMapping();             // 执行映射修改 → 同步传输区
+                funcBox->setCurrentIndex(funcBox->findData((int)canopen::F_TPDO1));
+                auto *i0 = w.findChild<QComboBox *>(QStringLiteral("coPdoIdx0"));
+                mapSyncOk = mapSyncOk && i0 && i0->currentData().toUInt() == ((0x6064u << 8) | 0);
+            }
+        }
+        QString line = QStringLiteral("UITEST canopen mapSync ok=%1").arg(mapSyncOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && mapSyncOk;
     if (auto *g = w.findChild<QAction *>(QStringLiteral("actionProtoGeneric"))) g->trigger();
 
     // EDS 导入往返（复制到 <exe>/eds 后重载，再恢复内置）

@@ -2373,6 +2373,29 @@ void MainWindow::coMapRemoveRow(int i)
     rebuildCoParams();
 }
 
+// 执行「PDO 映射修改」后：把新映射同步到 PDO 传输区（写入会话缓存，切换过去即显示新映射）
+void MainWindow::coSyncTransmitFromMapping()
+{
+    if (!m_coMapPdoBox) return;
+    const int pdoFn = m_coMapPdoBox->currentData().toInt();
+    if (canopen::pdoMappingObjectIndex((canopen::Function)pdoFn) < 0) return;
+
+    QVector<CoPdoRow> rows;
+    for (QComboBox *ib : m_coMapObjBoxes) {
+        const uint packed = ib->currentData().toUInt();
+        CoPdoRow r;
+        r.index = (packed >> 8) & 0xFFFF;
+        r.sub   = packed & 0xFF;
+        const canopen::OdEntry *oe = canopen::findOd(r.index, r.sub);
+        r.value = oe ? oe->dflt : QStringLiteral("0");
+        rows.append(r);
+    }
+    m_coPdoCache[pdoFn] = rows;                 // PDO 传输区据此显示（会话记忆）
+    if (m_coPdoFunc == pdoFn) m_coPdoRows = rows;
+    logInfo(QStringLiteral("已同步 PDO 传输映射：%1 → %2 个对象")
+                .arg(m_coMapPdoBox->currentText()).arg(rows.size()));
+}
+
 void MainWindow::coAddPdoRow()
 {
     coSnapshotPdoRows();
@@ -2751,6 +2774,9 @@ void MainWindow::onCoSend()
             if (proto::decodeDataFrame(f, &rx)) coAppendScroll(QStringLiteral("TX"), rx);
         }
         logInfo(QStringLiteral("已发送实战示例（%1 帧）").arg(frames.size()));
+        // 若执行的是「PDO 映射修改」，同步到 PDO 传输区
+        if (canopen::examples().at(curCoExample()).name.contains(QStringLiteral("映射修改")))
+            coSyncTransmitFromMapping();
         return;
     }
     // 命令列表非空：按列表顺序依次发送全部帧

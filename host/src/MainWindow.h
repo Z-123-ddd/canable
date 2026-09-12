@@ -95,6 +95,7 @@ public:
     // 接收区：滚动视图文本（供无头自测读取）
     QString scrollText() const;
     // 持久化（供无头自测复用；正常由 closeEvent 自动调用）
+    void coSyncTransmitFromMapping();   // 执行映射修改后：同步到 PDO 传输区（会话记忆；供自测调用）
     void saveSettings();
     void loadSettings();
 
