@@ -493,6 +493,8 @@ static const char *const k_err_names[ERR_MAX] =
     "ERR_USB_BADFRAME",
     "ERR_USB_CRC",
     "ERR_FRAMELIST_FULL",
+    "ERR_CAN_ACK",
+    "ERR_CAN_BUSOFF",
 };
 
 // CRC-8, poly 0x07, init 0, MSB-first (matches the host implementation).

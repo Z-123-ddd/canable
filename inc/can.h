@@ -155,6 +155,10 @@ int8_t hal_dlc_code_to_bytes(uint32_t hal_dlc_code);
 uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data);
 void can_rx_isr(void);        // FDCAN1_INT0 ISR: drain HW FIFO into software RX queue
 void can_send_timer_tick(void);  // periodic timer ISR (see can.c state machine)
+// Report a CAN bus fault to the host (reads FDCAN protocol status; called from
+// the Bus-Off ISR). Asserts ERR_CAN_ACK when the last error was a missing ACK
+// (e.g. no other node on the bus), otherwise ERR_CAN_BUSOFF.
+void can_report_bus_error(void);
 uint8_t is_can_msg_pending(uint8_t fifo);
 
 // ---- Host data / TX job control (single vs continuous send) ----

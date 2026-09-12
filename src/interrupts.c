@@ -84,10 +84,11 @@ void FDCAN1_INT0_IRQHandler(void)
         can_rx_isr();
     }
 
-    // Bus-Off detected -> restart the CAN controller automatically
+    // Bus-Off detected -> report to the host, then restart the controller
     if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_BUS_OFF) == SET)
     {
         FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_BUS_OFF);
+        can_report_bus_error();      // AA AD: ERR_CAN_ACK / ERR_CAN_BUSOFF
         FDCAN_Start(FDCAN1);
     }
 }

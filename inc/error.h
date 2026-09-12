@@ -21,6 +21,8 @@ typedef enum _error_t
     ERR_USB_BADFRAME,     // malformed binary USB frame / unsupported command
     ERR_USB_CRC,          // binary USB frame CRC mismatch
     ERR_FRAMELIST_FULL,   // list-mode burst longer than CAN_FRAME_LIST_MAX_FRAMES
+    ERR_CAN_ACK,          // CAN TX: no ACK (no other node on the bus)
+    ERR_CAN_BUSOFF,       // CAN controller entered bus-off (protocol error)
 
     ERR_MAX
 } error_t;

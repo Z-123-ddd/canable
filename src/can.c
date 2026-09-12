@@ -660,11 +660,26 @@ static uint8_t can_tx_hw(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
     if (bus_state != ON_BUS)
         return 0;
     if (FDCAN_GetTxFifoFreeLevel(FDCAN1) == 0)
-        return 0;
+        return 0;                 // HW FIFO full: retry later (not an error)
     if (FDCAN_AddMsgToTxFifoQ(FDCAN1, (FDCAN_TxHeaderType *)hdr,
                                (uint8_t *)data) == SUCCESS)
         return 1;
+    error_assert(ERR_CAN_TXFAIL); // enqueue rejected by the FDCAN controller
     return 0;
+}
+
+// Report a CAN bus fault to the host (called from the Bus-Off ISR). Reads the
+// FDCAN protocol status to distinguish a missing-ACK situation (no other node
+// on the bus -> the transmit error counter climbs and the controller goes
+// bus-off) from other protocol errors (stuff/form/bit/CRC).
+void can_report_bus_error(void)
+{
+    FDCAN_ProtocolStatus ps;
+    FDCAN_GetProtocolStatus(FDCAN1, &ps);
+    if (ps.LastError == FDCAN_LAST_ERROR_ACK)
+        error_assert(ERR_CAN_ACK);      // no ACK -> likely no other node
+    else
+        error_assert(ERR_CAN_BUSOFF);   // other arbitration/data phase error
 }
 
 // Host data-frame entry point (called from the binary USB protocol parser).
