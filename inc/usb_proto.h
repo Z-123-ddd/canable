@@ -74,6 +74,9 @@
 //         the CAN state machine / interrupts / timer and brings RS485 up in the
 //         receive state; switching back to CAN releases RS485 and restarts FDCAN.
 #define USB_PROTO_CMD_ID_SET_WORK_MODE 9
+//   id 10: query the firmware version. The MCU replies with an ASCII string
+//          (GIT_VERSION): AA AC 02 | LEN(1) | TEXT(LEN).
+#define USB_PROTO_CMD_ID_GET_VERSION  10
 
 // Allowed range (ms) for the SET_INTERVAL command value.
 #define USB_PROTO_TX_INTERVAL_MIN_MS  1U
@@ -129,9 +132,14 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
 //         little-endian uint32. Sent once, when the auto-bitrate scan locks
 //         onto a rate that actually receives frames (see can_scan_poll()).
 #define USB_PROTO_RSP_ID_BITRATE_LOCK  1
+//   id 2: firmware version. Payload = 1-byte length + ASCII (GIT_VERSION).
+#define USB_PROTO_RSP_ID_VERSION       2
 
 // Emit the "bitrate locked" response: AA AC 01 | hz[4] LE.
 void usb_proto_send_bitrate_lock(uint32_t hz);
+
+// Emit the firmware-version response: AA AC 02 | LEN | TEXT(ASCII).
+void usb_proto_send_version(const char *ver);
 
 // ---- Warning / error frames (AA AD, MCU -> host) ----
 // Emit: AA AD | TEXT(ASCII error enum) | DA AA | CRC8.

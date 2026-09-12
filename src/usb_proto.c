@@ -262,6 +262,11 @@ static void proto_cmd_dispatch(void)
             dfu_enter_bootloader();   // never returns on success
             break;
 
+        case USB_PROTO_CMD_ID_GET_VERSION:
+            // Reply with the ASCII firmware version string.
+            usb_proto_send_version(GIT_VERSION);
+            break;
+
         default:
             error_assert(ERR_USB_BADFRAME);
             break;
@@ -454,6 +459,23 @@ void usb_proto_send_bitrate_lock(uint32_t hz)
     b[5] = (uint8_t)(hz >> 16);
     b[6] = (uint8_t)(hz >> 24);
     cdc_transmit(b, (uint16_t)sizeof(b));
+}
+
+
+// Emit the firmware-version response (MCU -> host): AA AC 02 | LEN | TEXT(ASCII).
+void usb_proto_send_version(const char *ver)
+{
+    if (ver == 0) ver = "unknown";
+    uint16_t n = (uint16_t)strlen(ver);
+    if (n > 60) n = 60;                 // bound to the frame buffer
+    uint8_t frame[4 + 60];
+    frame[0] = USB_PROTO_SOF1;          // 0xAA
+    frame[1] = USB_PROTO_RSP_SOF2;      // 0xAC
+    frame[2] = USB_PROTO_RSP_ID_VERSION;// 0x02
+    frame[3] = (uint8_t)n;              // length
+    for (uint16_t i = 0; i < n; i++)
+        frame[4 + i] = (uint8_t)ver[i];
+    cdc_transmit(frame, (uint16_t)(4 + n));
 }
 
 

@@ -4,7 +4,20 @@
 
 | 构件 | 版本 | 来源 |
 |---|---|---|
-| 固件 | **v20.0.1** | `Makefile` 的 `FW_VERSION`；Keil 构建见 `inc/git_version.h` |
+| 固件 | **v20.0.3** | `Makefile` 的 `FW_VERSION`；Keil 构建见 `inc/git_version.h` |
+
+---
+
+## 固件 v20.0.3
+
+### 新增
+- USB 命令 **`10` = GET_VERSION**：主机查询固件版本，MCU 回 ASCII 版本串（`GIT_VERSION`，
+  由 `Makefile` 通过 `-DGIT_VERSION` 传入；Keil 见 `inc/git_version.h`）。
+  响应帧：`AA AC 02 | LEN(1) | TEXT(LEN)`（与上位机 `RSP_VERSION` 解析一致）。
+  至此上位机「帮助→关于」可显示设备固件版本。
+
+### 变更
+- 版本号 `v20.0.2 → v20.0.3`（`Makefile` `FW_VERSION` + `inc/git_version.h`）。
 
 ---
 
