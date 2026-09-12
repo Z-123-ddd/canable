@@ -47,6 +47,14 @@ struct LogPanel {
     QPlainTextEdit *log   = nullptr;
 };
 
+// 接收区「按字段筛选」：一行输入框（每列一个），匹配当前可见表的各行。
+struct RxFilterBar {
+    QString              name;    // 持久化键名（如 can.rx）
+    QWidget             *row = nullptr;   // 筛选行控件（随表显示/隐藏）
+    QVector<QLineEdit *> edits;   // 每列一个输入框
+    QTableWidget        *table = nullptr; // 目标表
+};
+
 // CANopen 命令列表一条：标签 + 待发送的帧序列
 struct CoListEntry {
     QString           label;   // 显示标签
@@ -138,6 +146,11 @@ private slots:
     void coRestoreFromEntry(int row);   // 点击列表项：回填编辑器（供再次修改）
     void coMapAddRow();                 // PDO 映射修改：追加一个目标对象
     void coMapRemoveRow(int i);         // PDO 映射修改：删除一个目标对象
+    // 接收区筛选（各页接收区表头上方，每列一个输入框；随当前可见表切换）
+    QWidget *makeRxFilterRow(const QString &name, QTableWidget *table, const QStringList &labels);
+    void     applyRxFilterIdx(int idx);
+    void     applyRxFilter(QTableWidget *table);   // 按表指针筛选
+    QWidget *filterRowFor(QTableWidget *table);    // 取某表的筛选行（显示/隐藏用）
     void coLoadCoList();                // 从 QSettings 恢复列表
     void onImportEds();                 // 导入外部 EDS 文件
     void onResetEds();                  // 恢复内置 EDS
@@ -242,6 +255,7 @@ private:
     QPushButton *m_importBtn = nullptr;
 
     // 接收区（接收表格）
+    QVector<RxFilterBar> m_rxFilters;   // 各接收区筛选行
     QTableWidget *m_rxTable = nullptr;
     QPushButton *m_clearRxBtn = nullptr;
     QHash<quint32, int> m_rxRowById;     // 帧 id -> 接收表行号

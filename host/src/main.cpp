@@ -25,6 +25,7 @@
 #include <QEvent>
 #include <QKeyEvent>
 #include <cstdio>
+#include "HexFormat.h"
 #include "MainWindow.h"
 #include "Protocol.h"
 #include "SimpleProto.h"
@@ -159,6 +160,36 @@ static int runUiTest()
               && logClean
               && flushTotal == 4 && bundle1 && bundle2
               && rxRows == 2 && rxOk && noGrid && csvOk;
+
+    // ---- 接收区按字段筛选（跟随当前可见表）----
+    bool rxFilterOk = false;
+    {
+        auto *idF = w.findChild<QLineEdit *>(QStringLiteral("can.rx.f0"));
+        auto *dtF = w.findChild<QLineEdit *>(QStringLiteral("can.rx.f3"));
+        rxFilterOk = idF != nullptr && dtF != nullptr;
+        if (rxFilterOk) {
+            idF->setText(QStringLiteral("0x002"));               // 只留 id=0x2 的行
+            rxFilterOk = rxTable->isRowHidden(0) && !rxTable->isRowHidden(1);
+            idF->clear();
+            dtF->setText(QStringLiteral("aa"));                  // 忽略大小写、包含匹配（只 row1 的 AA BB）
+            rxFilterOk = rxFilterOk && rxTable->isRowHidden(0) && !rxTable->isRowHidden(1);
+            dtF->clear();
+            rxFilterOk = rxFilterOk && !rxTable->isRowHidden(0) && !rxTable->isRowHidden(1);
+        }
+        QString line = QStringLiteral("UITEST rxfilter ok=%1").arg(rxFilterOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && rxFilterOk;
+
+    // ---- 十六进制输入自动格式化（大写 + 每字节空格）----
+    bool hexFmtOk = formatHexBytes(QStringLiteral("aa1b2c")) == QStringLiteral("AA 1B 2C")
+                 && formatHexBytes(QStringLiteral("E8 03")) == QStringLiteral("E8 03")
+                 && formatHexBytes(QStringLiteral("zz12g")) == QStringLiteral("12")
+                 && formatHexBytes(QStringLiteral("a b c")) == QStringLiteral("AB C");
+    { QString line = QStringLiteral("UITEST hexfmt ok=%1").arg(hexFmtOk ? 1 : 0);
+      line += QChar(10); std::fputs(line.toLocal8Bit().constData(), stdout); }
+    ok = ok && hexFmtOk;
 
     // ---- 传输选择：切到 USB 自动刷新，端口框始终可用 ----
     auto *transportBox = w.findChild<QComboBox *>("transportBox");

@@ -5,6 +5,7 @@
 #include "FirmwareDialog.h"
 #include "dfu_device.h"
 #include "SimpleProto.h"
+#include "HexFormat.h"
 #include "CanOpenProto.h"
 #include "ObjectDictionaryDialog.h"
 
@@ -205,7 +206,7 @@ MainWindow::MainWindow(QWidget *parent)
     fg->addWidget(m_frameTypeBox, 0, 7);
 
     fg->addWidget(new QLabel(QStringLiteral("数据(hex):")), 1, 0);
-    m_dataEdit = new QLineEdit;                     // 默认空
+    m_dataEdit = new HexLineEdit;                   // 默认空（自动大写 + 每字节空格）
     m_dataEdit->setObjectName("dataEdit");
     m_dataEdit->setMinimumWidth(8 * 3 * 8);         // 能完整显示 >=8 字节
     m_dataEdit->setMinimumHeight(tallerHeight(m_dataEdit));   // 高度 ×1.5
@@ -230,6 +231,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->verticalHeader()->setVisible(false);
     m_table->setMinimumHeight(300);
+    m_table->setItemDelegateForColumn(COL_DATA, new HexDelegate(this));   // 数据列：自动大写 + 每字节空格
     resetTable();                 // 默认 20 行空表格
     llv->addWidget(m_table);
 
@@ -311,6 +313,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_rxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
     m_rxTable->verticalHeader()->setVisible(false);
     m_rxTable->setMinimumWidth(420);
+    rv->addWidget(makeRxFilterRow(QStringLiteral("can.rx"), m_rxTable,
+        { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
+          QStringLiteral("数据"), QStringLiteral("次数") }));
     rv->addWidget(m_rxTable, 1);
 
     m_scrollTable = new QTableWidget(0, SC_COL_COUNT);   // 滚动显示：表头固定，数据行滚动追加
@@ -329,6 +334,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_scrollTable->verticalHeader()->setVisible(false);
     m_scrollTable->setMinimumWidth(420);
     m_scrollTable->setVisible(false);
+    rv->addWidget(makeRxFilterRow(QStringLiteral("can.scroll"), m_scrollTable,
+        { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
+          QStringLiteral("长度"), QStringLiteral("数据") }));
     rv->addWidget(m_scrollTable, 1);
 
     auto *rb = new QHBoxLayout;
@@ -426,7 +434,7 @@ MainWindow::MainWindow(QWidget *parent)
         auto *dv = new QVBoxLayout(dataBox);
         auto *dh = new QHBoxLayout;
         dh->addWidget(new QLabel(QStringLiteral("数据(hex):")));
-        m_rs485DataEdit = new QLineEdit;
+        m_rs485DataEdit = new HexLineEdit;
         m_rs485DataEdit->setObjectName("rs485DataEdit");
         m_rs485DataEdit->setMinimumHeight(tallerHeight(m_rs485DataEdit));
         m_rs485DataEdit->setClearButtonEnabled(true);
@@ -483,6 +491,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_rs485RxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_rs485RxTable->verticalHeader()->setVisible(false);
         m_rs485RxTable->setMinimumWidth(420);
+        rv->addWidget(makeRxFilterRow(QStringLiteral("rs485.rx"), m_rs485RxTable,
+            { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
+              QStringLiteral("数据"), QStringLiteral("次数") }));
         rv->addWidget(m_rs485RxTable, 1);
 
         m_rs485ScrollTable = new QTableWidget(0, SC_COL_COUNT);
@@ -501,6 +512,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_rs485ScrollTable->verticalHeader()->setVisible(false);
         m_rs485ScrollTable->setMinimumWidth(420);
         m_rs485ScrollTable->setVisible(false);
+        rv->addWidget(makeRxFilterRow(QStringLiteral("rs485.scroll"), m_rs485ScrollTable,
+            { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
+              QStringLiteral("长度"), QStringLiteral("数据") }));
         rv->addWidget(m_rs485ScrollTable, 1);
 
         auto *rb = new QHBoxLayout;
@@ -622,6 +636,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_simpleRxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_simpleRxTable->verticalHeader()->setVisible(false);
         m_simpleRxTable->setMinimumWidth(420);
+        srv->addWidget(makeRxFilterRow(QStringLiteral("simple.rx"), m_simpleRxTable,
+            { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
+              QStringLiteral("数据"), QStringLiteral("次数") }));
         srv->addWidget(m_simpleRxTable, 1);
 
         m_simpleScrollTable = new QTableWidget(0, SC_COL_COUNT);
@@ -640,6 +657,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_simpleScrollTable->verticalHeader()->setVisible(false);
         m_simpleScrollTable->setMinimumWidth(420);
         m_simpleScrollTable->setVisible(false);
+        srv->addWidget(makeRxFilterRow(QStringLiteral("simple.scroll"), m_simpleScrollTable,
+            { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
+              QStringLiteral("长度"), QStringLiteral("数据") }));
         srv->addWidget(m_simpleScrollTable, 1);
 
         auto *srb = new QHBoxLayout;
@@ -789,6 +809,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_coRxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_coRxTable->verticalHeader()->setVisible(false);
         m_coRxTable->setMinimumWidth(420);
+        rv->addWidget(makeRxFilterRow(QStringLiteral("co.rx"), m_coRxTable,
+            { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
+              QStringLiteral("数据"), QStringLiteral("次数") }));
         rv->addWidget(m_coRxTable, 1);
 
         m_coScrollTable = new QTableWidget(0, SC_COL_COUNT);
@@ -807,6 +830,9 @@ MainWindow::MainWindow(QWidget *parent)
         m_coScrollTable->verticalHeader()->setVisible(false);
         m_coScrollTable->setMinimumWidth(420);
         m_coScrollTable->setVisible(false);
+        rv->addWidget(makeRxFilterRow(QStringLiteral("co.scroll"), m_coScrollTable,
+            { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
+              QStringLiteral("长度"), QStringLiteral("数据") }));
         rv->addWidget(m_coScrollTable, 1);
 
         auto *crb = new QHBoxLayout;
@@ -938,6 +964,8 @@ MainWindow::MainWindow(QWidget *parent)
         m_rs485ScrollMode = !m_rs485ScrollMode;
         if (m_rs485RxTable) m_rs485RxTable->setVisible(!m_rs485ScrollMode);
         if (m_rs485ScrollTable) m_rs485ScrollTable->setVisible(m_rs485ScrollMode);
+        if (QWidget *r = filterRowFor(m_rs485RxTable)) r->setVisible(!m_rs485ScrollMode);
+        if (QWidget *r = filterRowFor(m_rs485ScrollTable)) r->setVisible(m_rs485ScrollMode);
         if (m_rs485ModeLbl) m_rs485ModeLbl->setText(m_rs485ScrollMode
                                                      ? QStringLiteral("滚动") : QStringLiteral("就地"));
     });
@@ -1520,6 +1548,7 @@ void MainWindow::feedRx(const proto::RxFrame &f)
         QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_rxTable->item(row, RX_COUNT)->setText(QString::number(count));
     appendScroll(QStringLiteral("RX"), f);            // 收一条
+    applyRxFilter(m_rxTable);                         // 筛选随新行刷新
 }
 
 int MainWindow::rxRowCount() const
@@ -2020,6 +2049,7 @@ void MainWindow::simpleFeedRx(const proto::RxFrame &f)
     m_simpleRxTable->item(row, RX_DATA)->setText(QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_simpleRxTable->item(row, RX_COUNT)->setText(QString::number(count));
     simpleAppendScroll(QStringLiteral("RX"), f);
+    applyRxFilter(m_simpleRxTable);
 }
 
 void MainWindow::simpleAppendScroll(const QString &dir, const proto::RxFrame &f)
@@ -2043,6 +2073,7 @@ void MainWindow::simpleAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
     if (m_simpleScrollTable->rowCount() > 5000) m_simpleScrollTable->removeRow(0);
+    applyRxFilter(m_simpleScrollTable);
     if (follow) m_simpleScrollTable->scrollToBottom();
 }
 
@@ -2051,6 +2082,8 @@ void MainWindow::simpleSetRxMode(bool scroll)
     m_simpleScrollMode = scroll;
     if (m_simpleRxTable) m_simpleRxTable->setVisible(!scroll);
     if (m_simpleScrollTable) m_simpleScrollTable->setVisible(scroll);
+    if (QWidget *r = filterRowFor(m_simpleRxTable)) r->setVisible(!scroll);
+    if (QWidget *r = filterRowFor(m_simpleScrollTable)) r->setVisible(scroll);
     if (m_simpleModeLbl) m_simpleModeLbl->setText(scroll ? QStringLiteral("滚动") : QStringLiteral("就地"));
 }
 
@@ -2857,6 +2890,7 @@ void MainWindow::coFeedRx(const proto::RxFrame &f)
     m_coRxTable->item(row, RX_DATA)->setText(QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_coRxTable->item(row, RX_COUNT)->setText(QString::number(count));
     coAppendScroll(QStringLiteral("RX"), f);
+    applyRxFilter(m_coRxTable);
 }
 
 void MainWindow::coAppendScroll(const QString &dir, const proto::RxFrame &f)
@@ -2880,6 +2914,7 @@ void MainWindow::coAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
     if (m_coScrollTable->rowCount() > 5000) m_coScrollTable->removeRow(0);
+    applyRxFilter(m_coScrollTable);
     if (follow) m_coScrollTable->scrollToBottom();
 }
 
@@ -2888,6 +2923,8 @@ void MainWindow::coSetRxMode(bool scroll)
     m_coScrollMode = scroll;
     if (m_coRxTable) m_coRxTable->setVisible(!scroll);
     if (m_coScrollTable) m_coScrollTable->setVisible(scroll);
+    if (QWidget *r = filterRowFor(m_coRxTable)) r->setVisible(!scroll);
+    if (QWidget *r = filterRowFor(m_coScrollTable)) r->setVisible(scroll);
     if (m_coModeLbl) m_coModeLbl->setText(scroll ? QStringLiteral("滚动") : QStringLiteral("就地"));
 }
 
@@ -3025,8 +3062,72 @@ void MainWindow::appendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
     if (m_scrollTable->rowCount() > 5000) m_scrollTable->removeRow(0);   // 上限，滚掉最旧行
+    applyRxFilter(m_scrollTable);
     if (follow) m_scrollTable->scrollToBottom();   // 仅当原本在底部时才跟随
 }
+
+// ===========================================================================
+//  接收区筛选：每列表头上方一个输入框，隐藏不匹配的行（包含匹配，忽略大小写）
+// ===========================================================================
+QWidget *MainWindow::makeRxFilterRow(const QString &name, QTableWidget *table,
+                                     const QStringList &labels)
+{
+    RxFilterBar bar;
+    bar.name = name;
+    bar.table = table;
+    auto *w = new QWidget;
+    auto *h = new QHBoxLayout(w);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(2);
+    const int idx = m_rxFilters.size();
+    for (int c = 0; c < labels.size(); ++c) {
+        auto *e = new QLineEdit;
+        e->setObjectName(name + QStringLiteral(".f%1").arg(c));
+        e->setPlaceholderText(labels.at(c));
+        e->setClearButtonEnabled(true);
+        e->setMinimumWidth(52);
+        // 数据列给更宽
+        h->addWidget(e, labels.at(c).contains(QStringLiteral("数据")) ? 3 : 1);
+        bar.edits.append(e);
+        connect(e, &QLineEdit::textChanged, this, [this, idx]() { applyRxFilterIdx(idx); });
+    }
+    m_rxFilters.append(bar);
+    m_rxFilters[idx].row = w;
+    w->setVisible(table->isVisible());   // 随表初始可见性
+    return w;
+}
+
+void MainWindow::applyRxFilterIdx(int idx)
+{
+    if (idx < 0 || idx >= m_rxFilters.size()) return;
+    RxFilterBar &b = m_rxFilters[idx];
+    if (!b.table) return;
+    for (int r = 0; r < b.table->rowCount(); ++r) {
+        bool show = true;
+        for (int c = 0; c < b.edits.size(); ++c) {
+            const QString f = b.edits.at(c)->text().trimmed();
+            if (f.isEmpty()) continue;
+            auto *it = b.table->item(r, c);
+            const QString t = it ? it->text() : QString();
+            if (!t.contains(f, Qt::CaseInsensitive)) { show = false; break; }
+        }
+        b.table->setRowHidden(r, !show);
+    }
+}
+
+void MainWindow::applyRxFilter(QTableWidget *table)
+{
+    for (int i = 0; i < m_rxFilters.size(); ++i)
+        if (m_rxFilters.at(i).table == table) { applyRxFilterIdx(i); return; }
+}
+
+QWidget *MainWindow::filterRowFor(QTableWidget *table)
+{
+    for (const RxFilterBar &b : m_rxFilters)
+        if (b.table == table) return b.row;
+    return nullptr;
+}
+
 
 // 切换接收区显示模式：false=就地更新（按 ID 汇总）, true=滚动显示（发一条收一条）
 void MainWindow::setRxMode(bool scroll)
@@ -3034,6 +3135,8 @@ void MainWindow::setRxMode(bool scroll)
     m_scrollMode = scroll;
     if (m_rxTable) m_rxTable->setVisible(!scroll);
     if (m_scrollTable) m_scrollTable->setVisible(scroll);
+    if (QWidget *r = filterRowFor(m_rxTable)) r->setVisible(!scroll);
+    if (QWidget *r = filterRowFor(m_scrollTable)) r->setVisible(scroll);
     if (m_modeLbl)
         m_modeLbl->setText(scroll ? QStringLiteral("滚动") : QStringLiteral("就地"));
     if (m_modeBtn)
@@ -3217,6 +3320,11 @@ void MainWindow::saveSettings()
     }
     // RS485 数据区
     if (m_rs485DataEdit)  st.setValue("rs485/data", m_rs485DataEdit->text());
+    // 接收区筛选框文本（各页）
+    for (const RxFilterBar &b : m_rxFilters)
+        for (int c = 0; c < b.edits.size(); ++c)
+            st.setValue(QStringLiteral("rxfilter/%1/%2").arg(b.name).arg(c),
+                        b.edits.at(c)->text());
     st.sync();
 }
 
@@ -3411,6 +3519,13 @@ void MainWindow::loadSettings()
         }
         updateCoPreview();
     }
+    // 接收区筛选框文本（各页）
+    for (const RxFilterBar &b : m_rxFilters)
+        for (int c = 0; c < b.edits.size(); ++c) {
+            const QString v = st.value(
+                QStringLiteral("rxfilter/%1/%2").arg(b.name).arg(c), QString()).toString();
+            if (!v.isEmpty()) { b.edits.at(c)->setText(v); applyRxFilter(b.table); }
+        }
 }
 
 void MainWindow::closeEvent(QCloseEvent *e)
