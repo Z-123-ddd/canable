@@ -70,6 +70,7 @@ private slots:
     void onLogMessage(const proto::LogMessage &m);   // AA AD 警告/报错
 
     void onBitrateChanged(int idx);
+    void onDataBitrateChanged(int idx);  // 数据域波特率下拉变化
     void onIntervalChanged(int ms);
 
     void onResetList();     // 重置为 20 行空表格（默认值）
@@ -129,7 +130,8 @@ private:
     QPushButton *m_updateFwBtn = nullptr;   // 更新固件（进入 DFU + 烧录）
 
     // CAN 参数
-    QComboBox *m_bitrateBox = nullptr;   // 波特率下拉
+    QComboBox *m_bitrateBox = nullptr;     // 仲裁域波特率下拉（命令 1）
+    QComboBox *m_dataBitrateBox = nullptr; // CAN FD 数据域波特率下拉（命令 8）
     QCheckBox *m_loopBox = nullptr;      // 循环发送复选框
     QSpinBox *m_intervalSpin = nullptr;  // 周期 ms
 

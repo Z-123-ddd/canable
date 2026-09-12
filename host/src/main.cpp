@@ -176,6 +176,28 @@ static int runUiTest()
 
     ok = ok && transOk;
 
+    // ---- 仲裁域波特率下拉：存在且默认 1 Mbit/s ----
+    bool arbBitrateOk = false;
+    if (auto *arb = w.findChild<QComboBox *>("arbBitrateBox"))
+        arbBitrateOk = (arb->count() > 0) && (arb->currentData().toUInt() == 1000000u);
+    ok = ok && arbBitrateOk;
+    {
+        QString line = QStringLiteral("UITEST arbBitrate ok=%1").arg(arbBitrateOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+    }
+
+    // ---- 数据域波特率下拉：存在且默认 5 Mbit/s ----
+    bool dataBitrateOk = false;
+    if (auto *db = w.findChild<QComboBox *>("dataBitrateBox"))
+        dataBitrateOk = (db->count() > 0) && (db->currentData().toUInt() == 5000000u);
+    ok = ok && dataBitrateOk;
+    {
+        QString line = QStringLiteral("UITEST dataBitrate ok=%1").arg(dataBitrateOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+    }
+
     const QString stext = w.scrollText();
     const bool scrollOk = stext.contains(QStringLiteral("TX")) &&
                           stext.contains(QStringLiteral("RX")) &&

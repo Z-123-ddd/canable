@@ -1,128 +1,150 @@
-# 更新日志 (CHANGELOG)
+# CANable2-N32 上位机 (host)
 
-本仓库包含两个独立版本化的构件：
+基于 Qt6 (Widgets + SerialPort) 的 CANable2-N32 上位机。**支持两条通信路径**：
+- **串口(CDC)**：设备以 USB CDC 虚拟串口呈现时，用 `QSerialPort` 通信；
+- **USB(libusb)**：设备被 libusb/WinUSB 驱动接管（无 COM 口）时，用 libusb 直接走 Bulk 端点
+  （OUT `0x01` / IN `0x81`）通信。
 
-| 构件 | 版本 | 版本来源 |
+界面顶部「**传输**」下拉切换两条路径；切换时自动刷新设备列表。两条路径共用同一套协议
+解析与 UI，协议与固件 `inc/usb_proto.h` 逐字节对齐。
+
+## 控件约定
+- **传输** → 下拉框：`串口(CDC)` / `USB(libusb)`（切换自动刷新下方设备列表）
+- **端口/设备** → 下拉框：串口模式列 COM 口，USB 模式列全部可用 libusb 设备
+  （本应用设备 `16D0:117E` 排首位）；两模式下均可选
+- **刷新** → 按当前传输重新枚举
+- **仲裁域波特率** → 下拉框（默认 1M；CAN 仲裁段速率，下发命令 1）
+- **数据域波特率** → 下拉框（默认 5M，可选 2M/5M；CAN FD 数据段速率，下发命令 8）
+- **列表模式**   → 按钮（可勾选切换 单帧/列表，下发命令 7）
+- **循环发送**   → 复选框（决定 TX_START 的 value：勾=1 连续 / 不勾=0 单次）
+- 周期(ms) 输入框 → 命令 6（1..1000）
+- 帧编辑（ID/扩展/FD/BRS/RTR/DLC/数据）+ 加入列表 / 清空列表
+- 导入记录 / 导出CSV → 其他 CAN 工具记录文件的导入/导出（见下）
+- 发送 / 停止 / 查询状态 → 命令 2 / 3 / 4
+
+## 导入其他 CAN 工具的记录文件
+
+「发送列表」旁的**导入记录**按钮可导入其他 CAN 调试/分析软件导出的记录，解析成 CAN/CAN FD
+帧填入列表并勾选，点「发送」即重放（复用现有列表模式，不改变发送协议）。
+
+自动识别以下格式：
+
+| 格式 | 来源 | 说明 |
 |---|---|---|
-| 固件 | **v1.1.2** | `Makefile` 的 `FW_VERSION`；Keil 构建见 `inc/git_version.h` |
-| 上位机 | **v1.1.2** | `host/package.sh` 的 `APPVER`；安装包见 `host/installer/canable2_host.nsi` |
+| Vector ASC (`.asc`) | CANalyzer / CANoe | 经典帧 / CANFD 行 / 扩展帧 `x` 后缀 |
+| PEAK TRC (`.trc`) | PCAN-View | v1.0 / v1.1 / v1.3 / v2.x；按 `;$COLUMNS` 列名 + `;$DELIMITER` 声明符解析，声明与实际不符时自动探测 `, ; \|` 制表符/空白 |
+| candump | SocketCAN | 可读格式 与 `-L` 日志格式 |
+| 通用 CSV (`.csv`) | SavvyCAN 等 | 单列十六进制 或 每字节一列；兼容 python-can Base64 |
 
----
+> 当前列表不支持远程帧(RTR)：导入时跳过并计数提示；错误帧/注释行同样跳过。
+> 无头验证：`CyberBeast-CANable2.exe --import-trace <file>`。
 
-## 固件 v1.1.2
-
-### 新增 — 错误主动上报帧（`AA AD`）
-
-`error_assert()` 触发的错误现由固件主动上报给上位机：
-
+## 构建（Windows，工具链在 D 盘）
+```bash
+source /d/Qt/qt-tools-env.sh          # 或 cmd: call D:\Qt\qt-tools-env.bat
+cd host
+cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=D:/Qt/6.8.3/mingw_64
+cmake --build build
+# 产物: host/build/CyberBeast-CANable2.exe
 ```
-AA AD | TEXT(ASCII 错误枚举名, 如 ERR_USB_BADFRAME) | DA AA | CRC
+
+运行需要 Qt DLL 与 `libusb-1.0.dll`（构建后自动拷到 exe 同目录）：
+```bash
+./build/CyberBeast-CANable2.exe
 ```
 
-- CRC-8（poly `0x07`, init 0，无反射），**仅覆盖 TEXT**；`AA AD` 与 `DA AA` 不参与校验。
-- `error_assert()` 将错误**入队**（可在中断上下文调用），**主循环**取出后发送，避免在
-  中断里操作 USB 发送环。
-- 新增 `error_take_pending()`（`src/error.c`）与 `usb_proto_send_error()`（`src/usb_proto.c`）；
-  主循环（`src/main.c`）排空队列并发送。
-- 版本：固件 v1.1.1 → **v1.1.2**（`Makefile`/`inc/git_version.h`）。
+无头自检：
+```bash
+./build/CyberBeast-CANable2.exe --selftest     # 协议编解码自检
+./build/CyberBeast-CANable2.exe --uitest       # 界面逻辑自检（含传输切换）
+./build/CyberBeast-CANable2.exe --guitest      # GUI 烧机自检：打开主窗口→短暂运行→自动关闭退出
+./build/CyberBeast-CANable2.exe --usb-open     # 枚举 libusb 设备并尝试打开
+./build/CyberBeast-CANable2.exe --dfu-scan       # 枚举 USB 并判断 DFU 设备是否在线
+./build/CyberBeast-CANable2.exe --dfu-selftest   # DFU(DfuSe) 编码/布局解析离线自测
+```
 
-### 变更
-- 上报的是**错误枚举名称字符串**（如 `ERR_USB_BADFRAME`），非枚举值。
+> libusb 路径需设备的驱动为 WinUSB/libusbK（可用 [Zadig](https://zadig.akeo.ie/) 安装）。
+> 装成 libusb 驱动后该设备不再有 COM 口，此时在「传输」里选 `USB(libusb)`。
 
----
+## USB 更新固件 (DFU)
 
-## 上位机 v1.1.2
+「更新固件」流程：经当前连接发送命令 5（`ENTER_DFU`）→ MCU 跳入 N32 出厂 bootloader →
+USB 重新枚举为 **DFU 设备 `0x19F5:0x4537`（"N32-BOOTLOADER"）** → 弹出对话框烧录 `.bin`
+到 `0x08000000`，成功后自动跳转运行新固件。
 
-### 变更 — `AA AD` 解析对齐新格式
+- 固件侧跳转见仓库 `docs/FIRMWARE_PROTOCOL.md` §9（向量表在 SRAM 顶 `0x2002FE00`）。
+- **烧录由厂商 32 位 `NsMcuCmdDll.dll` 完成**（协议组帧/CRC 都在 DLL 内部，无需自行实现）。
+  因上位机是 64 位、无法同进程加载该 DLL，故随包分发一个 32 位 CLI
+  `vendor_dfu/nsi_dfu_flash.exe`，由 `src/VendorDfuFlasher.cpp` 用 QProcess 调用：
+  `ENUM → CONNECT → GET_INF → FLASH_ERASE → FLASH_DWNLD → APP_GO`。
+  关键：`NS_Dl_File.+0x08` 是**数据指针**（不是 CRC），`FLASH_DWNLD` 的 `a2..a5` 传 `NULL`。
+- 若 `vendor_dfu/` 缺失，自动回退到 `src/dfu_device.cpp` 的 libusb DfuSe 实现。
+- Windows 需安装厂商签名驱动 **NationstechDFU**（安装包「DFU 驱动」可选组件，`pnputil` 注册）；
+  否则 32 位 DLL 打不开 DFU 设备。
+- 无头验证：`CyberBeast-CANable2.exe --vendor-flash <bin> [addr]`。
 
-- `AA AD` 解析改为 **CRC 位于 `DA AA` 之后**（此前约定 CRC 在前），CRC 仅校验正文，与固件一致。
-  改动 `host/src/Protocol.cpp` 解析状态机与自检、`host/src/Protocol.h`。
-- 安装包版本 1.0.2 → **1.1.2**（`host/package.sh`、`canable2_host.nsi` 的 `VIProductVersion 1.1.2.0`）。
-- 说明：新布局与此前"CRC 在前"的约定不兼容；固件此前从未发送过该帧，无历史兼容问题。
+## 串口显示名（可选品牌化驱动）
 
----
+设备是标准 USB CDC-ACM（`bDeviceClass=0x02/SubClass=0x02`），Win10/11 内置 `usbser.inf`
+已能自动装 `usbser.sys` 并分配 COM 口 —— **不装任何驱动即可当 CAN 用**，只是端口显示为
+系统默认的 “USB Serial Device”。
 
-## 上位机 v1.0.2
+安装包里的**可选组件「品牌串口驱动 (CyberBeast USB2CAN)」**会把端口显示名改为
+**“CyberBeast USB2CAN (COMx)”**。它由 `installer/drivers/CyberBeast_USB2CAN/` 提供
+（`CyberBeast_USB2CAN.inf` + 签名 `.cat` + 自签名证书 `.cer`），安装时用 `certutil` 把证书
+装入本机受信任存储、再 `pnputil /add-driver` 注册；**需管理员**。详见该目录下 `README.md`。
 
-### 新增 — CAN 记录导入（重放）
+> 注意：CD 串口驱动与 DFU 驱动是**两个独立组件**，互不影响。
 
-从其他 CAN 调试/分析软件导出的记录文件中**导入 CAN/CAN FD 帧到「发送列表」**并重放：
+## 打包安装程序 (NSIS)
 
-- **自动识别格式**：Vector ASC（`.asc`，CANalyzer/CANoe）、PEAK TRC（`.trc`，PCAN-View）、
-  SocketCAN `candump`（可读格式与 `-L` 日志）、**通用 CSV**（单列十六进制 或 每字节一列，
-  兼容 SavvyCAN 风格；亦兼容 python-can 的 Base64 `data` 列）。
-- 解析后逐帧填入发送列表并勾选，点「发送」即按现有列表模式下发；**不改变**发送协议。
-- 内部实现：`host/src/TraceImporter.{h,cpp}`（字段约定对齐 python-can 对应 Reader）；
-  UI 接入 `host/src/MainWindow.cpp` 的 `onImportCsv()`（新增「导入记录」按钮）。
-- 无头验证：`canable2_host.exe --import-trace <file>`。
-- TRC 解析按 `;$COLUMNS` 列名 + `;$DELIMITER` 声明的分隔符（不再依赖版本号）；
-  优先用声明符，声明与实际不符时自动探测 `, ; | 制表符/空白`，兼容逗号/分号/竖线等变体。
+需要 NSIS（默认 `D:\NSIS`）与 Qt 的 `windeployqt`（随 Qt 安装）。
+`package.sh` 一键完成：Release 构建 → `windeployqt` 收集 Qt 运行库 + 拷贝
+`libusb-1.0.dll` → `makensis` 生成安装程序。
 
-> 说明：当前列表不支持远程帧(RTR)，导入时会跳过并计数提示；错误帧/注释行同样跳过。
+```bash
+source /d/Qt/qt-tools-env.sh
+cd host
+./package.sh
+# 产物: host/dist/CANable2-Host-Setup-<版本>.exe
+```
 
----
+- 安装程序默认装到 `D:\Programs\CANable2-Host`（可在向导里更改），带开始菜单与桌面
+  快捷方式、卸载程序与注册表卸载登记。
+- 卸载会删除安装目录、快捷方式与注册表项。
 
-## 固件 v1.1.1
+要点：
+- `host/installer/canable2_host.nsi` 为 NSIS 脚本（UTF-8 **带 BOM**，简体中文界面）。
+- 可用 `/DAPPVER=`、`/DINSTALLDIR=`、`/DREQLEVEL=`（`admin`/`user`）、`/DDEPLOYDIR=`、
+  `/DOUTFILE=` 覆盖脚本变量，便于自定义版本或做免提权的安装验证。
 
-### 变更
-- **新增显式固件版本**：`Makefile` 引入 `FW_VERSION := v1.1.1`，固件上报版本串为
-  `v1.1.1-<git 修订>`（`src/main.c` 的 `fw_id`）；Keil 构建对应 `inc/git_version.h`
-  的 `GIT_VERSION = "v1.1.1-keil"`。
 
-### 清理（行为不变）
-删除调试期遗留的杂乱/冗余代码共约 **293 行**：
-- 整份**未被调用**的 `src/printf.c` + `inc/printf.h`（含 `Makefile`、Keil 工程引用）；
-- **13 个无调用点**的函数/API 及其头声明：`can_set_id_format`、`can_set_silent`、
-  `can_set_autoretransmit`、`can_get_bitrate_hz`、`can_tx_job_running`、`system_irq_disable`、
-  `system_irq_enable`、`system_hex32`、`can_frame_list_pending_clear`、`can_timer_set_enabled`、
-  `error_timestamp`、`error_occurred`、`usb_proto_reset`；
-- `can.c` 中注释掉的 GPIO 死代码块与重复的文档注释、一处重复赋值；
-- 3 处无用 `#include`（`main.c`/`interrupts.c`/`usbd_cdc_if.c`）与 1 处冗余前向声明。
+## 协议速览
+- 命令帧 `AA AA | CMD | VALUE(4, LE)`
+  - 1 SET_BITRATE(Hz) / 2 TX_START(0单次,1连续) / 3 TX_STOP
+  - 4 GET_STATUS / 5 ENTER_DFU / 6 SET_INTERVAL(ms) / 7 SET_MODE(0单帧,1列表)
+- 数据帧 `AA AB | ID(2/4) | CTRL | DATA | CRC`
+  - CTRL: bit7 FDF, bit6 BRS, bit5 RTR, bits3..0 DLC
+  - CRC: 经典 CRC-15 / FD<=16 CRC-17 / FD>16 CRC-21（MSB-first, init0, xorout0）
+- 接收上报：MCU 以同样的 `AA AB` 二进制帧上报；`AA AC 01 <hz:4B LE>` 为波特率锁定；
+  GET_STATUS 回一行 ASCII `ST:bus=.. mode=S/L .. err=.....`
+- `AA AD` 为 MCU 主动上报的警告/报错帧：`AA AD | <ASCII 错误枚举名> | DA AA | CRC`（CRC-8 仅覆盖正文，`AA AD`/`DA AA` 不参与）
 
-> 保留 `inc/error.h` 的错误位 `enum`（其值即对外错误寄存器的 bit 位置，属协议 ABI，不可删改）。
+详见仓库 `docs/FIRMWARE_PROTOCOL.md`。
 
-### 文档
-- 订正 `docs/FIRMWARE_PROTOCOL.md` 中引用已删函数的过时描述（ID 格式固定为 STANDARD）。
+## 日志 / 接收区 / 持久化
 
----
-
-## 上位机 v1.0.1
-
-### 新增
-- **DFU 固件升级不再依赖厂商 GUI，也不再自实现 DfuSe 协议**：改由厂商 32 位
-  `NsMcuCmdDll.dll` 完成烧录（协议组帧与 CRC 全部在 DLL 内部）。
-  - 随包分发 32 位 CLI `host/vendor_dfu/nsi_dfu_flash.exe`（源码 `nsi_dfu_flash.c`），
-    由 `host/src/VendorDfuFlasher.cpp` 经 `QProcess` 调用，序列：
-    `ENUM → CONNECT → GET_INF → FLASH_ERASE → FLASH_DWNLD → APP_GO`（成功返回 `0xA000`）。
-  - `host/src/dfu_device.cpp`（libusb DfuSe 自实现）降级为**回退**路径。
-  - 无头验证命令：`CyberBeast-CANable2.exe --vendor-flash <bin> [addr]`。
-- **可选品牌串口驱动 `CyberBeast USB2CAN`**：把设备（`VID_16D0&PID_117E`）在设备管理器/
-  端口列表里的显示名改为 “CyberBeast USB2CAN”。驱动包位于
-  `host/installer/drivers/CyberBeast_USB2CAN/`（INF + 签名 `.cat` + 自签名证书 `.cer`），
-  安装包中作为**可选组件**：先 `certutil` 装入受信任存储，再 `pnputil /add-driver /install`。
-  - 该组件**纯改名、非必需**：设备是标准 CDC-ACM，Win10/11 内置 `usbser.inf` 已能免驱出 COM 口。
-
-### 变更 / 修正
-- 订正文档中关于 DFU 的旧结论：DFU 设备实际为 **`0x19F5:0x4537`（"Nationstech DFU"）**，
-  而非 ST 的 `0x0483:0xDF11`；并明确 **不要** 用 Zadig 给 DFU 设备装 libusb/WinUSB
-  （一个设备同一时刻只能绑定一个内核驱动，装了 libusb 反而使厂商烧录 DLL 打不开它）。
-- 安装包版本 1.0.0 → **1.0.1**（`VIProductVersion 1.0.1.0`）。
-- **上位机更名为 “CyberBeast CANable 2”**：
-  - 显示名（窗口标题、应用名、安装包产品名/开始菜单/桌面快捷方式）为 **`CyberBeast CANable 2`**（空格分隔）；
-  - 文件名与系统标识为 **`CyberBeast-CANable2`**：可执行文件 `CyberBeast-CANable2.exe`、
-    安装包 `CyberBeast-CANable2-Setup-<ver>.exe`、安装目录 `D:\Programs\CyberBeast-CANable2`、
-    卸载注册表键 `...\Uninstall\CyberBeast-CANable2`；
-  - 源文件 `host/installer/canable2_host.nsi`、内部 CMake target 名、以及依赖/扩展文件保持不变。
-
-### 仓库清理
-- 移除调试期产物：`ErrorLog/`、`_vt.txt`、`host/tools/`（逆向探测脚本）、
-  `tools/dm_function_validation.py`、旧安装包、厂商下载与参考文档、临时日志等。
-- `docs/` 中指向已删脚本的引用已同步更新。
-
----
-
-## 历史
-
-- **固件 v1.0.0 / 上位机 v1.0.0**：从 slcan ASCII 切换到**二进制 USB 协议**（`AA AA` 命令 /
-  `AA AB` 数据 / `AA AC` 响应 / `AA AD` 告警）；新增帧列表模式、周期发送、自动波特率扫描、
-  `GET_STATUS`、`ENTER_DFU`（命令 5）等。协议详见 `docs/FIRMWARE_PROTOCOL.md`。
+- **日志区仅显示“警告 / 报错”**：不再打印任何发送/接收的数据或命令十六进制；连接、枚举等
+  状态提示改到状态栏。MCU 主动上报的 `AA AD` 帧以“警告/报错”形式写入日志区（CRC 不符仍
+  显示并加注）。
+- **接收区两种视图**（顶部「切换图标」按钮 ⇄ 点击切换，上方以「滚动 / 就地」两字提示当前模式）：
+  - 默认「就地更新」：相同帧 ID 汇总到一行并累计次数；
+  - 「滚动显示」：**带固定表头**（方向/帧ID/类型/长度/数据），发一条收一条逐行追加、自动滚到底部
+    （表头不动、数据行滚动），可勾选「显示时间戳」。仅当竖直滑条已在最底端时才自动跟随；若手动把
+    滑条上移查看历史，则新数据仍在下方追加但**不强制拉到底部**。
+  - 「清空接收」会**同时清空**就地更新表与滚动表。
+  - 发送时把「要发送的帧」打印到滚动区；**数据未变化**再次点击发送时仍会在滚动区打印这些帧，
+    但实际只向 MCU 下发一条发送命令（TX_START），不重新打包数据帧（MCU 重发其缓存帧）。
+- **参数持久化**：关闭窗口时把发送列表（勾选/ID/标准扩展/长度/帧类型/数据）、单帧编辑区、
+  波特率、循环发送、周期、传输方式与端口、接收区视图与时戳选项写入 QSettings，下次启动自动
+  恢复（不含窗口几何）。

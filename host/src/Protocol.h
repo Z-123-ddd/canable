@@ -44,6 +44,7 @@ enum Cmd : uint8_t {
     CMD_ENTER_DFU   = 5,
     CMD_SET_INTERVAL= 6,   // value = 周期(ms), 1..1000
     CMD_SET_MODE    = 7,   // value: 0=单帧 1=列表
+    CMD_SET_DATA_BITRATE = 8,  // value = CAN FD 数据域波特率(Hz): 2000000/5000000
 };
 
 // 发送模式

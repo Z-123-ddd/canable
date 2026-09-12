@@ -52,6 +52,11 @@ static const BaudItem kBauds[] = {
     {"500 kbit/s",  500000},
     {"750 kbit/s",  750000},
     {"1 Mbit/s",    1000000},
+};
+
+// CAN FD 数据域（数据段）可选波特率：默认 5M
+static const BaudItem kDataBauds[] = {
+    {"2 Mbit/s",    2000000},
     {"5 Mbit/s",    5000000},
 };
 
@@ -153,12 +158,20 @@ MainWindow::MainWindow(QWidget *parent)
     // ---------------- CAN 参数行 ----------------
     auto *paramBox = new QGroupBox(QStringLiteral("CAN 参数"));
     auto *ph = new QHBoxLayout(paramBox);
-    ph->addWidget(new QLabel(QStringLiteral("波特率:")));
-    m_bitrateBox = new QComboBox;
+    ph->addWidget(new QLabel(QStringLiteral("仲裁域波特率:")));
+    m_bitrateBox = new QComboBox;                // 仲裁段波特率（命令 1）
+    m_bitrateBox->setObjectName("arbBitrateBox");
     for (const auto &b : kBauds)
         m_bitrateBox->addItem(QString::fromUtf8(b.name), b.hz);
     m_bitrateBox->setCurrentIndex(9);             // 默认 1 Mbit/s
     ph->addWidget(m_bitrateBox);
+    ph->addWidget(new QLabel(QStringLiteral("数据域波特率:")));
+    m_dataBitrateBox = new QComboBox;            // CAN FD 数据段波特率（命令 8）
+    m_dataBitrateBox->setObjectName("dataBitrateBox");
+    for (const auto &b : kDataBauds)
+        m_dataBitrateBox->addItem(QString::fromUtf8(b.name), b.hz);
+    m_dataBitrateBox->setCurrentIndex(1);         // 默认 5 Mbit/s
+    ph->addWidget(m_dataBitrateBox);
     m_loopBox = new QCheckBox(QStringLiteral("循环发送"));
     m_loopBox->setObjectName("loopBox");
     ph->addWidget(m_loopBox);
@@ -367,6 +380,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_updateFwBtn,&QPushButton::clicked, this, &MainWindow::onUpdateFirmware);
     connect(m_bitrateBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onBitrateChanged);
+    connect(m_dataBitrateBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onDataBitrateChanged);
     connect(m_intervalSpin, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &MainWindow::onIntervalChanged);
     connect(m_resetBtn, &QPushButton::clicked, this, &MainWindow::onResetList);
@@ -452,7 +467,10 @@ void MainWindow::onPortOpened(const QString &name)
     // 连接后自动下发当前 CAN 波特率 + 发送模式（打包为一条消息）
     queueCommand(proto::CMD_SET_BITRATE,
                  (quint32)m_bitrateBox->currentData().toUInt(),
-                 QStringLiteral("设置波特率 %1").arg(m_bitrateBox->currentText()));
+                 QStringLiteral("设置仲裁域波特率 %1").arg(m_bitrateBox->currentText()));
+    queueCommand(proto::CMD_SET_DATA_BITRATE,
+                 (quint32)m_dataBitrateBox->currentData().toUInt(),
+                 QStringLiteral("设置数据域波特率 %1").arg(m_dataBitrateBox->currentText()));
     queueCommand(proto::CMD_SET_MODE, proto::MODE_SINGLE,
                  QStringLiteral("发送模式 单帧"));
     m_lastMode = (int)proto::MODE_SINGLE;
@@ -476,6 +494,7 @@ void MainWindow::onSerialError(const QString &msg)
 void MainWindow::setPortUiEnabled(bool open)
 {
     m_bitrateBox->setEnabled(open);
+    m_dataBitrateBox->setEnabled(open);
     m_intervalSpin->setEnabled(open);
     m_sendBtn->setEnabled(open);
     m_stopBtn->setEnabled(open);
@@ -494,7 +513,16 @@ void MainWindow::onBitrateChanged(int)
         return;
     sendCommand(proto::CMD_SET_BITRATE,
                 (quint32)m_bitrateBox->currentData().toUInt(),
-                QStringLiteral("设置波特率 %1").arg(m_bitrateBox->currentText()));
+                QStringLiteral("设置仲裁域波特率 %1").arg(m_bitrateBox->currentText()));
+}
+
+void MainWindow::onDataBitrateChanged(int)
+{
+    if (!m_link->isOpen())
+        return;
+    sendCommand(proto::CMD_SET_DATA_BITRATE,
+                (quint32)m_dataBitrateBox->currentData().toUInt(),
+                QStringLiteral("设置数据域波特率 %1").arg(m_dataBitrateBox->currentText()));
 }
 
 void MainWindow::onIntervalChanged(int ms)
@@ -1164,7 +1192,8 @@ void MainWindow::saveSettings()
     st.setValue("edit/len",         m_lenBox->currentData().toInt());
     st.setValue("edit/ftype",       m_frameTypeBox->currentData().toInt());
     st.setValue("edit/data",        m_dataEdit->text());
-    st.setValue("can/bitrateIndex", m_bitrateBox->currentIndex());
+    st.setValue("can/bitrateIndex",    m_bitrateBox->currentIndex());
+    st.setValue("can/dataBitrateIndex", m_dataBitrateBox->currentIndex());
     st.setValue("can/loop",         m_loopBox->isChecked());
     st.setValue("can/interval",     m_intervalSpin->value());
     st.setValue("ui/transport",     m_transportBox->currentIndex());
@@ -1215,6 +1244,12 @@ void MainWindow::loadSettings()
         if (idx >= 0 && idx < m_bitrateBox->count()) {
             QSignalBlocker b(m_bitrateBox);           // 连接前避免误下发
             m_bitrateBox->setCurrentIndex(idx);
+        }
+        // 数据域波特率独立持久化（默认 5M = index 1）
+        int didx = st.value("can/dataBitrateIndex", 1).toInt();
+        if (didx >= 0 && didx < m_dataBitrateBox->count()) {
+            QSignalBlocker b(m_dataBitrateBox);
+            m_dataBitrateBox->setCurrentIndex(didx);
         }
     }
     m_loopBox->setChecked(st.value("can/loop", false).toBool());
