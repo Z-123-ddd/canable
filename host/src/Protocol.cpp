@@ -507,6 +507,29 @@ bool selfTest(QString *report)
         }
     }
 
+    // 13. MCU 真实错误名上报：AA AD | ERR_USB_CRC | DA AA | CRC8（与固件 usb_proto_send_error 一致）
+    {
+        const QByteArray name = QByteArrayLiteral("ERR_USB_CRC");
+        uint8_t cb = 0; for (int i = 0; i < name.size(); i++) {
+            cb ^= (uint8_t)name[i];
+            for (int b = 0; b < 8; b++) cb = (cb & 0x80) ? (uint8_t)((cb << 1) ^ 0x07) : (uint8_t)(cb << 1);
+        }
+        QByteArray fr; fr.append(char(0xAA)); fr.append(char(0xAD));
+        fr += name; fr.append(char(0xDA)); fr.append(char(0xAA)); fr.append(char(cb));
+        Parser ps; ps.feed(fr);
+        auto msgs = ps.takeMessages();
+        // 逐字节校验帧头/尾标（避免十六进制转义吞并：用数值比较）
+        const bool hdrTailOk = fr.size() == 2 + name.size() + 3 &&
+            (uint8_t)fr[0] == 0xAA && (uint8_t)fr[1] == 0xAD &&
+            (uint8_t)fr[2 + name.size()] == 0xDA &&
+            (uint8_t)fr[3 + name.size()] == 0xAA &&
+            (uint8_t)fr[4 + name.size()] == cb;
+        check(hdrTailOk, "AA AD 组帧: AA AD <text> DA AA <crc8>");
+        check(msgs.size() == 1 && msgs[0].type == Message::Log &&
+              msgs[0].text == QStringLiteral("ERR_USB_CRC") && msgs[0].crcOk,
+              "MCU 错误名 ASCII 上报并被解析 (ERR_USB_CRC)");
+    }
+
     // 13. AA AC 版本响应（id=2）：AA AC 02 | LEN | TEXT，分片喂入
     {
         QByteArray ver;

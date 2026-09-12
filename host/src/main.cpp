@@ -692,6 +692,34 @@ static int runUiTest()
         std::fputs(line.toLocal8Bit().constData(), stdout);
     }
     ok = ok && cacheConsistOk;
+
+    // ---- MCU 错误 ASCII 上报：AA AD 帧 → 日志区 ----
+    bool errReportOk = false;
+    {
+        // 1) 直接经解析器：AA AD | ERR_USB_CRC | DA AA | CRC8
+        const QByteArray name = QByteArrayLiteral("ERR_USB_CRC");
+        quint8 cb = 0;
+        for (int i = 0; i < name.size(); ++i) {
+            cb ^= (quint8)name[i];
+            for (int b = 0; b < 8; ++b) cb = (cb & 0x80) ? (quint8)((cb << 1) ^ 0x07) : (quint8)(cb << 1);
+        }
+        QByteArray fr; fr.append(char(0xAA)); fr.append(char(0xAD));
+        fr += name; fr.append(char(0xDA)); fr.append(char(0xAA)); fr.append(char(cb));
+        proto::Parser ps; ps.feed(fr);
+        auto msgs = ps.takeMessages();
+        const bool parsed = msgs.size() == 1 && msgs[0].type == proto::Message::Log &&
+                            msgs[0].text == QStringLiteral("ERR_USB_CRC") && msgs[0].crcOk;
+        // 2) 该消息进入日志区（onLogMessage → logError）
+        proto::LogMessage lm; lm.text = msgs.isEmpty() ? QStringLiteral("ERR_USB_CRC") : msgs[0].text;
+        lm.crcOk = true;
+        QMetaObject::invokeMethod(&w, "onLogMessage", Qt::DirectConnection,
+                                  Q_ARG(proto::LogMessage, lm));
+        errReportOk = parsed && w.logText().contains(QStringLiteral("ERR_USB_CRC"));
+        QString line = QStringLiteral("UITEST errReport ok=%1").arg(errReportOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && errReportOk;
     if (auto *g = w.findChild<QAction *>(QStringLiteral("actionProtoGeneric"))) g->trigger();
 
     // EDS 导入往返（复制到 <exe>/eds 后重载，再恢复内置）

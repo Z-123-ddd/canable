@@ -1,5 +1,15 @@
 # 更新日志 (CHANGELOG) — CyberBeast CANable 2 上位机
 
+## 未发布 (Unreleased) — 验证：MCU 错误以 ASCII 名上报（AA AD）
+
+- 固件：`error_assert()` 入队 → 主循环 `error_take_pending()` 取出 → `usb_proto_send_error()`
+  发送 **`AA AD | <ERR_xxx ASCII> | DA AA | CRC8`**；错误名与 `error_t` 一一对应。
+- 上位机：`AA AD` 解析为日志正文（含 CRC 校验），写入日志区。
+- 新增回归：selftest 校验 `AA AD ... ERR_USB_CRC ... DA AA <crc8>` 组帧/解析；
+  uitest 新增 `errReport`（解析 → 日志含 `ERR_USB_CRC`）。
+
+---
+
 ## 未发布 (Unreleased) — 发送缓存统一（跨页面一致 + 未变只发发送命令）
 
 - 新增 `sendCachedFrames()`：所有页面（通用CAN / Simple / CANopen）共用同一份「发送模式 + 缓存数据」
