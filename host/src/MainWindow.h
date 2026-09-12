@@ -356,6 +356,7 @@ private:
     QLineEdit   *m_coSdoValueEdit = nullptr;    // SDO 写值
     // PDO（RPDO/TPDO）多行：EDS 对象下拉 + 用户数值
     QVector<CoPdoRow>     m_coPdoRows;           // PDO 行模型
+    QHash<int, QVector<CoPdoRow>> m_coPdoCache;   // 会话内各 PDO 的值记忆（重开不保留）
     QVector<QComboBox *>  m_coPdoIdxBoxes;       // 行对象下拉（与 m_coPdoRows 平行）
     QVector<QLineEdit *>  m_coPdoValEdits;        // 行数值输入
     QPushButton *m_coPdoAddBtn = nullptr;         // 添加对象

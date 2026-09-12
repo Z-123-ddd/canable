@@ -601,9 +601,8 @@ static int runUiTest()
             auto *idx0 = w.findChild<QComboBox *>(QStringLiteral("coPdoIdx0"));
             auto *idx1 = w.findChild<QComboBox *>(QStringLiteral("coPdoIdx1"));
             auto *prev = w.findChild<QLineEdit *>(QStringLiteral("coPreview"));
-            auto *addB = w.findChild<QPushButton *>(QStringLiteral("coPdoAddBtn"));
-            // 默认取 EDS 映射（RPDO4=6040+6071），且可配置（下拉可选、可增删）
-            pdoOk = idx0 && idx1 && prev && addB && idx0->isEnabled() && idx1->isEnabled() &&
+            // 索引不可选（仅按默认映射显示）；RPDO4 默认 = 6040h + 6071h
+            pdoOk = idx0 && idx1 && prev && !idx0->isEnabled() && !idx1->isEnabled() &&
                     idx0->currentData().toUInt() == ((0x6040u << 8) | 0) &&
                     idx1->currentData().toUInt() == ((0x6071u << 8) | 0);
             if (pdoOk) {
@@ -612,17 +611,18 @@ static int runUiTest()
                 // RPDO4(node1)=0x501；6071h(INT16)=1000 → E8 03
                 pdoOk = pdoOk && prev->text().contains(QStringLiteral("ID=0x501")) &&
                         prev->text().contains(QStringLiteral("E8 03"));
-                // 可配置：改第一行映射对象 → 保存/重开后仍为用户映射
-                int k = -1;
-                for (int j = 0; j < idx0->count(); ++j)
-                    if (idx0->itemData(j).toUInt() == ((0x6064u << 8) | 0)) k = j;
-                if (k >= 0) idx0->setCurrentIndex(k);
+                // 会话内记忆：切到 TPDO1 再切回 RPDO4，输入值仍保留
+                funcBox->setCurrentIndex(funcBox->findData((int)canopen::F_TPDO1));
+                funcBox->setCurrentIndex(funcBox->findData((int)canopen::F_RPDO4));
+                auto *val1b = w.findChild<QLineEdit *>(QStringLiteral("coPdoVal1"));
+                pdoOk = pdoOk && val1b && val1b->text() == QStringLiteral("1000");
+                // 重开恢复默认（不持久化）：新窗口 RPDO4 的 coPdoVal1 复位为默认 0
                 w.saveSettings();
-                {
-                    MainWindow wPdo;
-                    auto *i0 = wPdo.findChild<QComboBox *>(QStringLiteral("coPdoIdx0"));
-                    pdoOk = pdoOk && i0 && i0->currentData().toUInt() == ((0x6064u << 8) | 0);
-                }
+                MainWindow wPdo;
+                if (auto *cb = wPdo.findChild<QComboBox *>(QStringLiteral("coFuncBox")))
+                    cb->setCurrentIndex(cb->findData((int)canopen::F_RPDO4));
+                auto *vp = wPdo.findChild<QLineEdit *>(QStringLiteral("coPdoVal1"));
+                pdoOk = pdoOk && vp && vp->text() != QStringLiteral("1000");
             }
             QString line = QStringLiteral("UITEST canopen pdo ok=%1");
             line = line.arg(pdoOk ? 1 : 0);

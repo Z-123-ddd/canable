@@ -911,11 +911,15 @@ MainWindow::MainWindow(QWidget *parent)
     // Open（CANopen）协议页
     connect(m_coFuncBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
-        // 选 PDO 功能（RPDO/TPDO）时：按手册/看 EDS 默认映射填行
         const int fn = m_coFuncBox->currentData(Qt::UserRole).toInt();
+        // 会话内记忆：切走前把当前 PDO 的值存入缓存
+        if (m_coPdoFunc >= 0) { coSnapshotPdoRows(); m_coPdoCache[m_coPdoFunc] = m_coPdoRows; }
+        // 选 PDO 功能（RPDO/TPDO）：有缓存用缓存，否则用 EDS 默认映射
         if (curCoExample() < 0 &&
             canopen::pdoMappingObjectIndex((canopen::Function)fn) >= 0) {
-            if (m_coPdoFunc != fn) {
+            if (m_coPdoCache.contains(fn)) {
+                m_coPdoRows = m_coPdoCache.value(fn);
+            } else {
                 m_coPdoRows.clear();
                 for (const canopen::PdoMapEntry &mp : canopen::pdoMapping((canopen::Function)fn)) {
                     CoPdoRow r; r.index = mp.index; r.sub = mp.sub;
@@ -923,8 +927,8 @@ MainWindow::MainWindow(QWidget *parent)
                     r.value = od ? od->dflt : QStringLiteral("0");
                     m_coPdoRows.append(r);
                 }
-                m_coPdoFunc = fn;
             }
+            m_coPdoFunc = fn;
         } else {
             m_coPdoFunc = -1;
         }
@@ -2290,47 +2294,34 @@ void MainWindow::rebuildCoParams()
         connect(m_coSdoValueEdit, &QLineEdit::textChanged, this, [this]() { updateCoPreview(); });
         setEn();
     } else {
-        // RPDO / TPDO：**映射可配置**——每个映射对象的索引可选（取自 EDS），数值可填；
-        // 默认取该 PDO 的 EDS 默认映射，用户可增删/替换为自定义映射关系。
+        // RPDO / TPDO：**索引不可选**——仅按默认映射显示对象（只读），数值可填；
+        // 映射关系修改请用「★ PDO 映射修改」示例。值在本次运行内记忆，重开恢复默认。
         if (m_coPdoRows.isEmpty()) m_coPdoRows.append(CoPdoRow{});
-        g->addWidget(new QLabel(QStringLiteral("（映射可配置：选择映射对象并填写数值；默认取 EDS 映射）")),
+        g->addWidget(new QLabel(QStringLiteral("（对象按默认映射固定，仅可填写数值）")),
                      row++, 0, 1, 4);
-        const QVector<canopen::OdEntry> od = canopen::objectDictionary();
         for (int i = 0; i < m_coPdoRows.size(); ++i) {
             const CoPdoRow &r = m_coPdoRows.at(i);
             auto *ib = new QComboBox;
             ib->setObjectName(QStringLiteral("coPdoIdx%1").arg(i));
             ib->setMinimumWidth(240);
-            int sel = -1;
-            for (int k = 0; k < od.size(); ++k) {
-                const canopen::OdEntry &e = od.at(k);
-                ib->addItem(canopen::odDisplay(e),
-                            QVariant((uint)((e.index << 8) | (e.sub < 0 ? 0 : (e.sub & 0xFF)))));
-                if (e.index == r.index && ((e.sub < 0 ? 0 : e.sub) == r.sub)) sel = k;
-            }
-            if (sel >= 0) ib->setCurrentIndex(sel);
+            ib->setEnabled(false);                    // 不可选：仅按默认映射显示
+            const canopen::OdEntry *e = canopen::findOd((quint16)r.index, r.sub);
+            if (e)
+                ib->addItem(canopen::odDisplay(*e),
+                            QVariant((uint)((r.index << 8) | (r.sub & 0xFF))));
+            else
+                ib->addItem(QStringLiteral("0x%1").arg(r.index, 4, 16, QLatin1Char('0')).toUpper(),
+                            QVariant((uint)((r.index << 8) | (r.sub & 0xFF))));
             g->addWidget(ib, row, 0, 1, 2);
             m_coPdoIdxBoxes.append(ib);
-            connect(ib, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                    this, [this](int) { updateCoPreview(); });
 
             auto *ve = new QLineEdit(r.value);
             ve->setObjectName(QStringLiteral("coPdoVal%1").arg(i));
             g->addWidget(ve, row, 2);
             m_coPdoValEdits.append(ve);
             connect(ve, &QLineEdit::textChanged, this, [this]() { updateCoPreview(); });
-
-            auto *rm = new QPushButton(QStringLiteral("×"));
-            rm->setObjectName(QStringLiteral("coPdoRm%1").arg(i));
-            rm->setFixedWidth(28);
-            g->addWidget(rm, row, 3);
-            connect(rm, &QPushButton::clicked, this, [this, i]() { coRemovePdoRow(i); });
             ++row;
         }
-        m_coPdoAddBtn = new QPushButton(QStringLiteral("＋ 添加映射对象"));
-        m_coPdoAddBtn->setObjectName("coPdoAddBtn");
-        g->addWidget(m_coPdoAddBtn, row++, 0, 1, 4);
-        connect(m_coPdoAddBtn, &QPushButton::clicked, this, &MainWindow::coAddPdoRow);
     }
     updateCoPreview();
 }
@@ -3289,16 +3280,7 @@ void MainWindow::saveSettings()
     if (m_coSdoOpBox)     st.setValue("co/sdoOp", m_coSdoOpBox->currentData().toInt());
     if (m_coSdoIdxBox)    st.setValue("co/sdoIdx", m_coSdoIdxBox->currentData().toUInt());
     if (m_coSdoValueEdit) st.setValue("co/sdoValue", m_coSdoValueEdit->text());
-    // PDO 行（用户可配置的映射关系）：持久化
-    {
-        coSnapshotPdoRows();   // 先从控件快照，保存用户当前映射
-        st.setValue("co/pdoRows", m_coPdoRows.size());
-        for (int i = 0; i < m_coPdoRows.size(); ++i) {
-            st.setValue(QStringLiteral("co/pdoIdx%1").arg(i), m_coPdoRows.at(i).index);
-            st.setValue(QStringLiteral("co/pdoSub%1").arg(i), m_coPdoRows.at(i).sub);
-            st.setValue(QStringLiteral("co/pdoVal%1").arg(i), m_coPdoRows.at(i).value);
-        }
-    }
+    // PDO 映射固定显示 + 会话记忆：不持久化（重开恢复默认）
     // PDO 映射修改示例：不持久化（关闭后恢复默认；会话内由 m_coMapCache 记忆）
     if (m_coHbStateBox)   st.setValue("co/hbState", m_coHbStateBox->currentData().toInt());
     // 命令列表：持久化
@@ -3476,22 +3458,6 @@ void MainWindow::loadSettings()
             if (rowSel < 0)
                 rowSel = m_coFuncBox->findData(st.value("co/func", (int)canopen::F_NMT).toInt(), Qt::UserRole);
             if (rowSel >= 0) m_coFuncBox->setCurrentIndex(rowSel);
-            const int lfn = m_coFuncBox->currentData(Qt::UserRole).toInt();
-            // PDO 行（用户自定义映射）：在重建前恢复；保存过则为用户映射，否则用 EDS 默认
-            if (canopen::pdoMappingObjectIndex((canopen::Function)lfn) >= 0) {
-                const int n = st.value("co/pdoRows", -1).toInt();
-                if (n >= 0) {
-                    m_coPdoRows.clear();
-                    for (int i = 0; i < n; ++i) {
-                        CoPdoRow r;
-                        r.index = st.value(QStringLiteral("co/pdoIdx%1").arg(i), 0x6071).toInt();
-                        r.sub   = st.value(QStringLiteral("co/pdoSub%1").arg(i), 0).toInt();
-                        r.value = st.value(QStringLiteral("co/pdoVal%1").arg(i), QStringLiteral("0")).toString();
-                        m_coPdoRows.append(r);
-                    }
-                }
-                m_coPdoFunc = lfn;   // 阻止用 EDS 默认覆盖已恢复的用户映射
-            }
             rebuildCoParams();
         }
         if (m_coNmtCmdBox) { int i = m_coNmtCmdBox->findData(st.value("co/nmt", 0x01).toInt()); if (i >= 0) m_coNmtCmdBox->setCurrentIndex(i); }
