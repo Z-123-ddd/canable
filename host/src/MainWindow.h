@@ -26,8 +26,44 @@ class QTableWidget;
 class QPlainTextEdit;
 class QLabel;
 class QToolButton;
+class QListWidget;
 class QCloseEvent;
 class QTimer;
+class QStackedWidget;
+class QGroupBox;
+class QAction;
+class QMenu;
+
+// 「连接区」「日志区」在多个页面各嵌一份，但状态共享（都指向同一 USB 链路/同一份日志）
+struct ConnPanel {
+    QComboBox   *transport = nullptr;
+    QComboBox   *port      = nullptr;
+    QPushButton *refresh   = nullptr;
+    QPushButton *open      = nullptr;
+    QPushButton *updateFw  = nullptr;
+};
+struct LogPanel {
+    QPushButton    *clear = nullptr;
+    QPlainTextEdit *log   = nullptr;
+};
+
+// CANopen 命令列表一条：标签 + 待发送的帧序列
+struct CoListEntry {
+    QString           label;   // 显示标签
+    QVector<QByteArray> frames; // 该条目的线上帧（数据帧字节）
+    // 用于点击回填编辑器的源描述
+    int              func = -1;  // 功能编号（F_COUNT = 实战示例）
+    int              example = -1; // 实战示例索引（-1=非示例）
+    QVector<double>  pv;         // 参数值（按功能语义）
+    QVector<int>     pu;         // 参数单位（示例）
+};
+
+// CANopen PDO 一行：EDS 对象（索引/子索引）+ 用户数值
+struct CoPdoRow {
+    int     index = 0x6071;   // 对象索引
+    int     sub   = 0;        // 子索引
+    QString value = QStringLiteral("0");
+};
 
 class MainWindow : public QMainWindow
 {
@@ -82,9 +118,37 @@ private slots:
     void onSend();
     void onStop();
     void onQueryStatus();
+    void onAbout();                 // 帮助：关于（显示软件/固件版本，点击时自动查询命令 10）
+
+    // Simple 协议页
+    void onSimpleCmdChanged(int idx);   // 命令下拉变化 → 重建参数输入
+    void onSimpleSend();                // 发送（数据变则打包，不变只发 TX_START）
+    void onSimpleStop();                // 停止发送
+
+    // Open（CANopen）协议页
+    void onCoSend();                    // 发送（普通帧单发；实战示例=序列）
+    void onCoStop();                    // 停止发送
+    void onOpenObjectDictionary();      // 打开对象字典浏览器（EDS）
+    // Open 页命令列表（可追加、按顺序发送、调换顺序）
+    void coAddCurrentToList();          // 把当前编辑器命令追加到列表
+    void coRebuildListWidget();         // 按模型重建 QListWidget（含 ↑/↓/×）
+    void coMoveListRow(int row, int delta);
+    void coRemoveListRow(int row);
+    void coSnapshotCoList();            // 从控件同步模型（拖动后）
+    void coRestoreFromEntry(int row);   // 点击列表项：回填编辑器（供再次修改）
+    void coMapAddRow();                 // PDO 映射修改：追加一个目标对象
+    void coMapRemoveRow(int i);         // PDO 映射修改：删除一个目标对象
+    void coLoadCoList();                // 从 QSettings 恢复列表
+    void onImportEds();                 // 导入外部 EDS 文件
+    void onResetEds();                  // 恢复内置 EDS
+    void coAddPdoRow();                 // PDO 追加一行对象
+    void coRemovePdoRow(int i);         // PDO 移除第 i 行
+    void coSnapshotPdoRows();           // 从控件收集当前 PDO 行
+
 
 protected:
     void closeEvent(QCloseEvent *e) override;
+    bool eventFilter(QObject *obj, QEvent *ev) override;   // 空格：发送列表当前行
 
 private:
     // ---- 发送表格 ----
@@ -106,6 +170,9 @@ private:
     };
     Payload collectPayload(QString *info = nullptr) const;
 
+    // 仅发送表格第 row 行（单帧，忽略勾选）；供空格键使用
+    void sendRowFrame(int row);
+
     void sendCommand(proto::Cmd cmd, quint32 value, const QString &note);
     // 打包：入队到 m_txBuf（仅记录），flushTx 一次性写出
     void queueBytes(const QByteArray &bytes, const QString &note);
@@ -117,6 +184,32 @@ private:
     void appendScroll(const QString &dir, const proto::RxFrame &f);  // 滚动视图追加一行（含表头）
     void setRxMode(bool scroll);                // 切换接收区显示模式并更新提示/图标
     void setPortUiEnabled(bool open);
+    // ---- 多页面共享的「连接区/日志区」----
+    QGroupBox   *buildConnGroup();      // 工厂：建一份连接区并注册（第 0 份沿用既有成员名）
+    QGroupBox   *buildLogGroup();       // 工厂：建一份日志区并注册（第 0 份沿用既有成员名）
+    void         syncConnUi();          // 把第 0 份（规范）的传输/端口/按钮状态广播到所有副本
+    void         onTransportChanged(int panelIdx);
+    void         onPortChanged(int panelIdx);
+    void setWorkMode(int mode);     // 模式菜单：切页面（CAN=0/RS485=1）+ 命令 9
+    // ---- Simple 协议页 ----
+    void rebuildSimpleParams();                        // 按当前命令重建参数输入框
+    void updateSimplePreview();                        // 刷新预览（CAN ID / 数据 hex）
+    QByteArray buildSimpleFrame(QString *err) const;   // 生成 Simple 主命令线上帧（含 CAN ID）
+    QVector<QByteArray> buildSimpleFrames(QString *err) const; // 单命令=1 帧；实战示例=固定前缀+主命令
+    int curSimpleExample() const;                      // 当前选中的实战示例索引（-1=普通命令）
+    // ---- Open（CANopen）协议页 ----
+    void rebuildCoParams();                             // 按当前功能重建参数输入
+    void updateCoPreview();                             // 刷新预览（COB-ID / DATA / 序列）
+    int  curCoExample() const;                          // 当前选中示例索引（-1=普通功能）
+    QVector<QByteArray> buildCoFrames(QString *err) const; // 普通功能=1 帧；示例=固定序列
+    void coFeedRx(const proto::RxFrame &f);             // 接收：就地汇总 + 滚动
+    void coAppendScroll(const QString &dir, const proto::RxFrame &f);
+    void coSetRxMode(bool scroll);
+    void simpleFeedRx(const proto::RxFrame &f);        // 接收：就地汇总 + 滚动
+    void simpleAppendScroll(const QString &dir, const proto::RxFrame &f);
+    void simpleSetRxMode(bool scroll);
+
+    void setProtocol(int which);    // 协议菜单：切协议调试页（0=CyberBeast 1=Simple 2=Open）
 
     SerialLink *m_serial = nullptr;
     UsbLink    *m_usb = nullptr;
@@ -178,6 +271,115 @@ private:
 
     QPlainTextEdit *m_log = nullptr;
     QLabel *m_statusLbl = nullptr;
+    QVector<ConnPanel> m_connPanels;   // 各页面的连接区（[0] 为规范/通用CAN）
+    QVector<LogPanel>  m_logPanels;    // 各页面的日志区（[0] 为规范/通用CAN）
+
+    // 模式页面（顶部菜单「模式」切换）
+    QStackedWidget *m_modeStack = nullptr;   // 0=CAN, 1=RS485
+    QWidget *m_pageCan = nullptr;
+    QWidget *m_pageRs485 = nullptr;
+    // RS485 页：数据区 + 接收区（布局与通用CAN一致）
+    QLineEdit    *m_rs485DataEdit = nullptr;   // 数据区：待发送数据(hex)
+    QPushButton  *m_rs485SendBtn = nullptr;
+    QPushButton  *m_rs485StopBtn = nullptr;
+    QTableWidget *m_rs485RxTable = nullptr;
+    QTableWidget *m_rs485ScrollTable = nullptr;
+    QToolButton  *m_rs485ModeBtn = nullptr;
+    QLabel       *m_rs485ModeLbl = nullptr;
+    QCheckBox    *m_rs485TsBox = nullptr;
+    QPushButton  *m_rs485ClearRxBtn = nullptr;
+    bool          m_rs485ScrollMode = false;
+    QAction *m_actionModeCan = nullptr;
+    QAction *m_actionModeRs485 = nullptr;
+
+    // 协议调试页（CAN 页内）：协议菜单切换（CyberBeast / Simple / Open）
+    QStackedWidget *m_protoStack = nullptr;
+    QWidget *m_pageProtoCyberBeast = nullptr;
+    QWidget *m_pageProtoSimple = nullptr;
+    QWidget *m_pageProtoOpen = nullptr;
+    QWidget *m_pageProtoGeneric = nullptr;    // 通用 CAN UI（现有那套）
+    QAction *m_actionProtoCyberBeast = nullptr;
+    QAction *m_actionProtoSimple = nullptr;
+    QAction *m_actionProtoOpen = nullptr;
+    QAction *m_actionProtoGeneric = nullptr;
+    QString m_deviceFwVersion;               // 帮助：设备固件版本（命令 10 回包，预留）
+    QMenu  *m_openMenu = nullptr;            // 当前由快捷键展开的菜单（切换时先收起）
+
+    // ---- Simple 协议页控件 ----
+    QComboBox   *m_simpleCmdBox = nullptr;      // 命令下拉
+    QLineEdit   *m_simpleNodeEdit = nullptr;    // 节点 ID
+    QLineEdit   *m_simpleGearEdit = nullptr;    // 减速比
+    QWidget     *m_simpleParamArea = nullptr;   // 参数输入容器
+    QVector<QLineEdit *> m_simpleParamEdits;    // 参数输入框（随命令重建）
+    QVector<QComboBox *> m_simpleUnitBoxes;     // 每个参数所选单位（与 m_simpleParamEdits 平行，可为空）
+    // RxSdo(0x04) 专用控件：opcode(读/写) + Endpoint + 写类型 + Value（仅写模式生效）
+    QComboBox   *m_sdoOpcodeBox = nullptr;
+    QLineEdit   *m_sdoEndpointEdit = nullptr;
+    QComboBox   *m_sdoTypeBox = nullptr;
+    QLineEdit   *m_sdoValueEdit = nullptr;
+    QLineEdit   *m_simplePreview = nullptr;     // 预览（CAN ID + 数据 hex）
+    QPushButton *m_simpleSendBtn = nullptr;
+    QPushButton *m_simpleStopBtn = nullptr;
+    QTableWidget *m_simpleRxTable = nullptr;    // 接收：就地汇总
+    QTableWidget *m_simpleScrollTable = nullptr;// 接收：滚动
+    QHash<quint32,int> m_simpleRxRowById;
+    QToolButton *m_simpleModeBtn = nullptr;
+    QLabel      *m_simpleModeLbl = nullptr;
+    QCheckBox   *m_simpleTsBox = nullptr;
+    QPushButton *m_simpleClearRxBtn = nullptr;
+    bool         m_simpleScrollMode = false;
+    QByteArray   m_simpleLastFrame;             // 上次发送的帧（判变化）
+    bool         m_simpleLastInit = false;
+
+    // ---- Open（CANopen）协议页控件 ----
+    QLineEdit   *m_coNodeEdit = nullptr;        // node_id
+    QLineEdit   *m_coGearEdit = nullptr;        // 减速比（输出轴:电机轴）
+    QComboBox   *m_coFuncBox = nullptr;         // 功能/COB-ID（含实战示例）
+    QWidget     *m_coParamArea = nullptr;       // 动态参数容器
+    QComboBox   *m_coNmtCmdBox = nullptr;       // NMT 状态命令字
+    QComboBox   *m_coSdoOpBox = nullptr;        // SDO 操作（写/读）
+    QComboBox   *m_coSdoIdxBox = nullptr;       // SDO 索引（EDS 下拉，含子索引/类型）
+    QLineEdit   *m_coSdoValueEdit = nullptr;    // SDO 写值
+    // PDO（RPDO/TPDO）多行：EDS 对象下拉 + 用户数值
+    QVector<CoPdoRow>     m_coPdoRows;           // PDO 行模型
+    QVector<QComboBox *>  m_coPdoIdxBoxes;       // 行对象下拉（与 m_coPdoRows 平行）
+    QVector<QLineEdit *>  m_coPdoValEdits;        // 行数值输入
+    QPushButton *m_coPdoAddBtn = nullptr;         // 添加对象
+    // 实战示例「PDO 映射修改」：可配置映射关系
+    QComboBox *m_coMapPdoBox = nullptr;           // 要修改的 PDO（RPDO1-4/TPDO1-4）
+    QVector<CoPdoRow> m_coMapRows;                // 目标映射对象（index/sub）
+    int m_coMapCurPdo = -1;                       // 当前选中的 PDO（用于会话缓存）
+    QHash<int, QVector<CoPdoRow>> m_coMapCache;   // 本次会话内各 PDO 的映射记忆（关闭不保存）
+    QVector<QComboBox *> m_coMapObjBoxes;         // 目标对象下拉
+    QPushButton *m_coMapAddBtn = nullptr;         // 追加目标对象
+    // 命令列表（所有功能都可追加）
+    QGroupBox   *m_coListBox = nullptr;           // 命令列表分组（实战示例时隐藏）
+    QListWidget *m_coList = nullptr;              // 待发送命令列表
+    QPushButton *m_coAddBtn = nullptr;            // 追加到列表
+    QPushButton *m_coListClearBtn = nullptr;      // 清空列表
+    QVector<CoListEntry> m_coListModel;           // 命令列表模型
+    int          m_coEditRow = -1;                // 当前正在编辑的列表行（-1=追加模式）
+    // 实战示例的用户输入（位置/速度/力矩），与 examples()[ex].inputs 平行
+    QVector<QLineEdit *> m_coExValEdits;
+    QVector<QComboBox *> m_coExUnitBoxes;
+    QPushButton *m_coImportEdsBtn = nullptr;      // 导入 EDS
+    QPushButton *m_coResetEdsBtn = nullptr;       // 恢复内置 EDS
+    QComboBox   *m_coHbStateBox = nullptr;      // 心跳状态字节
+    QLineEdit   *m_coPreview = nullptr;         // 预览
+    QPushButton *m_coSendBtn = nullptr;
+    QPushButton *m_coStopBtn = nullptr;
+    QPushButton *m_coOdBrowserBtn = nullptr;    // 对象字典按钮
+    QTableWidget *m_coRxTable = nullptr;        // 接收：就地汇总
+    QTableWidget *m_coScrollTable = nullptr;    // 接收：滚动
+    QHash<quint32,int> m_coRxRowById;
+    QToolButton *m_coModeBtn = nullptr;
+    QLabel      *m_coModeLbl = nullptr;
+    QCheckBox   *m_coTsBox = nullptr;
+    QPushButton *m_coClearRxBtn = nullptr;
+    bool         m_coScrollMode = false;
+    QByteArray   m_coLastFrame;                 // 上次发送的帧（判变化）
+    int          m_coPdoFunc = -1;              // 上次填充默认映射的 PDO 功能（-1=无）
+    bool         m_coLastInit = false;
 
     // DFU 设备检测轮询
     QTimer *m_dfuPollTimer = nullptr;

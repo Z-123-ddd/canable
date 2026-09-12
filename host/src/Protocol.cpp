@@ -232,7 +232,19 @@ void Parser::feed(const QByteArray &bytes)
         case RSP_ID:
             m_rspId = by;
             if (by == RSP_BITRATE_LOCK) { m_buf.clear(); m_state = RSP_PAYLOAD; m_need = 4; }
+            else if (by == RSP_VERSION) { m_buf.clear(); m_text.clear(); m_state = RSP_VER_LEN; m_need = 1; }
             else { finishResponse(); m_state = IDLE; }
+            break;
+
+        case RSP_VER_LEN:                          // RSP_VERSION：先读 1 字节长度
+            m_need = by;
+            if (m_need == 0) { finishResponse(); m_state = IDLE; }
+            else m_state = RSP_VER_TEXT;
+            break;
+
+        case RSP_VER_TEXT:                         // 再读 LEN 字节 ASCII
+            m_text.append(char(by));
+            if (--m_need == 0) { finishResponse(); m_state = IDLE; }
             break;
 
         case RSP_PAYLOAD:
@@ -289,8 +301,10 @@ void Parser::finishResponse()
     for (int i = 0; i < m_buf.size() && i < 4; i++)
         v |= (uint32_t)(uint8_t)m_buf[i] << (8 * i);
     m.response.value = v;
+    m.response.text = m_text;   // RSP_VERSION 的 ASCII（其余为空）
     m_msgs.append(m);
     m_buf.clear();
+    m_text.clear();
 }
 
 // ============================================================================
@@ -491,6 +505,20 @@ bool selfTest(QString *report)
                   msgs[0].text == QStringLiteral("E001"),
                   "AA AD 跨包分片解析");
         }
+    }
+
+    // 13. AA AC 版本响应（id=2）：AA AC 02 | LEN | TEXT，分片喂入
+    {
+        QByteArray ver;
+        const QByteArray vt = QByteArray("v20.0.2");
+        ver.append(char(0xAA)); ver.append(char(0xAC)); ver.append(char(0x02));
+        ver.append(char(vt.size())); ver += vt;
+        Parser ps; ps.feed(ver.left(2)); ps.feed(ver.mid(2));
+        auto msgs = ps.takeMessages();
+        check(msgs.size() == 1 && msgs[0].type == Message::Response &&
+              msgs[0].response.id == RSP_VERSION &&
+              msgs[0].response.text == QStringLiteral("v20.0.2"),
+              "AA AC 版本响应解析 (id=2)");
     }
 
     if (report) *report = log;

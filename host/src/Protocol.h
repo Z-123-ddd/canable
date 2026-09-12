@@ -45,6 +45,8 @@ enum Cmd : uint8_t {
     CMD_SET_INTERVAL= 6,   // value = 周期(ms), 1..1000
     CMD_SET_MODE    = 7,   // value: 0=单帧 1=列表
     CMD_SET_DATA_BITRATE = 8,  // value = CAN FD 数据域波特率(Hz): 2000000/5000000
+    CMD_SET_WORK_MODE    = 9,  // value: 0=CAN 1=RS485（切换调试器工作模式）
+    CMD_GET_VERSION      = 10, // 查询固件版本（回 AA AC RSP_VERSION）
 };
 
 // 发送模式
@@ -57,6 +59,7 @@ constexpr uint32_t INTERVAL_MAX_MS = 1000;
 
 // 响应 id
 constexpr uint8_t RSP_BITRATE_LOCK = 1;
+constexpr uint8_t RSP_VERSION      = 2;   // 版本：AA AC 02 | LEN(1) | TEXT(ASCII)
 
 // ---- DLC <-> 字节数 ----
 int  dlcToBytes(int dlc);     // 0..15 -> 0..64  (无效返回 -1)
@@ -85,6 +88,7 @@ struct RxFrame {                 // AA AB（MCU 上报的接收帧）
 struct RxResponse {              // AA AC
     uint8_t id = 0;
     uint32_t value = 0;
+    QString text;                // RSP_VERSION 的 ASCII 负载（其余为空）
 };
 
 struct LogMessage {              // AA AD（警告/报错）
@@ -111,7 +115,7 @@ private:
     bool tryParseBinary(int &outConsumed);
     void emitFrame(int idBytes, bool fd, int dataBytes);
     void finishResponse();
-    enum State { IDLE, HDR, CMD, DATA_ACC, RSP_ID, RSP_PAYLOAD, TEXT, LOG_TEXT, LOG_TAIL, LOG_CRC };
+    enum State { IDLE, HDR, CMD, DATA_ACC, RSP_ID, RSP_PAYLOAD, RSP_VER_LEN, RSP_VER_TEXT, TEXT, LOG_TEXT, LOG_TAIL, LOG_CRC };
     State m_state = IDLE;
     QByteArray m_buf;      // 二进制帧累积
     QString m_text;        // ASCII 状态行累积

@@ -1,0 +1,9 @@
+{
+    // 推荐安装的 VS Code 扩展
+    "recommendations": [
+        "ms-vscode.cpptools",     // C/C++ IntelliSense、调试
+        "ms-vscode.cmake-tools",  // CMake 集成（配置/构建/调试）
+        "twxs.cmake"              // CMakeLists.txt 语法高亮
+    ],
+    "unwantedRecommendations": []
+}

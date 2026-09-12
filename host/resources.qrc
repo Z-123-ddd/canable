@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/eds">
+        <file alias="ds402.eds">../docs/ds402.eds</file>
+    </qresource>
+</RCC>

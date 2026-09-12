@@ -1,0 +1,38 @@
+{
+    // CyberBeast CANable 2 上位机 —— VS Code 工作区/工程文件
+    // 双击本文件即可用 VS Code 打开上位机工程（前提：已关联 .code-workspace 类型）。
+    //
+    // 本目录下的 .vscode/ 已含 tasks.json / c_cpp_properties.json /
+    // settings.json / extensions.json，打开后自动生效：
+    //   · Ctrl+Shift+B          → 构建 (CMake + Ninja → build/CyberBeast-CANable2.exe)
+    //   · C/C++ 智能提示        → 基于 Qt6(MinGW) 头文件
+    //   · 任务面板              → Build / Rebuild / Clean / --selftest / --uitest /
+    //                             --guitest / Package(NSIS)
+    //
+    // 依赖（均在 D 盘）：Qt6(MinGW) D:/Qt/6.8.3/mingw_64、MinGW D:/Qt/Tools/mingw1310_64、
+    // CMake/Ninja D:/Qt/Tools/{CMake,Ninja}、libusb D:/libusb。
+    "folders": [
+        {
+            "name": "上位机 (CyberBeast CANable 2)",
+            "path": "."
+        }
+    ],
+    "settings": {
+        "search.exclude": {
+            "**/build": true,
+            "**/.codegraph": true,
+            "**/dist": true
+        },
+        "files.watcherExclude": {
+            "**/build": true,
+            "**/dist": true
+        }
+    },
+    "extensions": {
+        "recommendations": [
+            "ms-vscode.cpptools",
+            "ms-vscode.cmake-tools",
+            "twxs.cmake"
+        ]
+    }
+}

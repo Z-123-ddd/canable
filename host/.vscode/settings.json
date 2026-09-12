@@ -1,0 +1,19 @@
+{
+    // 工作区设置 (JSONC)
+    "search.exclude": {
+        "**/build": true,
+        "**/.codegraph": true,
+        "**/dist": true
+    },
+    "files.watcherExclude": {
+        "**/build": true,
+        "**/dist": true
+    },
+    "C_Cpp.intelliSenseEngine": "default",
+    // CMake Tools 扩展（若安装）的默认生成器与 Qt 前缀
+    "cmake.generator": "Ninja",
+    "cmake.configureSettings": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "D:/Qt/6.8.3/mingw_64"
+    }
+}

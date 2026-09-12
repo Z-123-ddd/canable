@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(canable2_host LANGUAGES CXX)
+project(canable2_host VERSION 10.0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -34,12 +35,20 @@ add_executable(canable2_host WIN32
     src/dfu_device.cpp
     src/FirmwareDialog.cpp
     src/TraceImporter.cpp
+    src/SimpleProto.cpp
+    src/CanOpenProto.cpp
+    src/ObjectDictionaryDialog.cpp
+    resources.qrc
 )
 
 # 生成的 exe 文件名（品牌化）；内部 target 名仍为 canable2_host
 set_target_properties(canable2_host PROPERTIES OUTPUT_NAME "CyberBeast-CANable2")
 
 target_include_directories(canable2_host PRIVATE src ${LIBUSB_INCLUDE_DIR})
+
+# 应用版本号（供「帮助→关于」显示；与 package.sh 的 APPVER 保持一致）
+target_compile_definitions(canable2_host PRIVATE
+    APP_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(canable2_host PRIVATE
     Qt6::Widgets
