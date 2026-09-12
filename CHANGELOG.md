@@ -1,5 +1,14 @@
 # 更新日志 (CHANGELOG) — CyberBeast CANable 2 上位机
 
+## 未发布 (Unreleased) — 发送缓存统一（跨页面一致 + 未变只发发送命令）
+
+- 新增 `sendCachedFrames()`：所有页面（通用CAN / Simple / CANopen）共用同一份「发送模式 + 缓存数据」
+  状态（对应固件全局唯一的发送源）。**模式未变不发 SET_MODE，数据未变不发数据帧，总是发 TX_START**。
+- 修复跨页面模式失配：在 A 页切成单帧后，B 页再发列表会正确重发 SET_MODE 并重推数据。
+- uitest 新增 `cacheConsist` 断言。
+
+---
+
 ## 未发布 (Unreleased) — CANopen：执行 PDO 映射修改后，PDO 传输区同步
 
 - 发送「★ PDO 映射修改」示例后，把新映射同步到对应 PDO 的**传输区**（会话缓存 `m_coPdoCache`）；

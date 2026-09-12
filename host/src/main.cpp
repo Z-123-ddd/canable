@@ -667,6 +667,31 @@ static int runUiTest()
         std::fputs(line.toLocal8Bit().constData(), stdout);
     }
     ok = ok && mapSyncOk;
+
+    // ---- 发送缓存跨页面一致：模式未变不发 SET_MODE，数据未变不发数据帧 ----
+    bool cacheConsistOk = false;
+    {
+        QByteArray fr = QByteArray::fromHex("AABB01020304050607FF");
+        w.sendCachedFrames(true, { fr }, 0u); w.flushTxNow();
+        const QByteArray f1 = w.lastTxFlush();
+        w.sendCachedFrames(true, { fr }, 0u); w.flushTxNow();
+        const QByteArray f2 = w.lastTxFlush();
+        // 另一页切到单帧：模式变化 → 必须重发 SET_MODE(single)
+        QByteArray fr2 = QByteArray::fromHex("AABB0A");
+        w.sendCachedFrames(false, { fr2 }, 0u); w.flushTxNow();
+        const QByteArray f3 = w.lastTxFlush();
+        cacheConsistOk =
+            f1.contains(QByteArray::fromHex("AAAA0701000000")) &&   // SET_MODE 列表
+            f1.contains(QByteArray::fromHex("AAAA0200000000")) &&   // TX_START
+            f1.contains(fr) &&
+            f2 == QByteArray::fromHex("AAAA0200000000") &&         // 未变：仅 TX_START
+            f3.contains(QByteArray::fromHex("AAAA0700000000")) &&   // SET_MODE 单帧
+            f3.contains(fr2) && f3.contains(QByteArray::fromHex("AAAA0200000000"));
+        QString line = QStringLiteral("UITEST cacheConsist ok=%1").arg(cacheConsistOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && cacheConsistOk;
     if (auto *g = w.findChild<QAction *>(QStringLiteral("actionProtoGeneric"))) g->trigger();
 
     // EDS 导入往返（复制到 <exe>/eds 后重载，再恢复内置）

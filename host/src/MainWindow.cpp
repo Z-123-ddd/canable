@@ -1179,6 +1179,8 @@ void MainWindow::onPortOpened(const QString &name)
     queueCommand(proto::CMD_SET_MODE, proto::MODE_SINGLE,
                  QStringLiteral("发送模式 单帧"));
     m_lastMode = (int)proto::MODE_SINGLE;
+    m_lastInit = false;        // 刚连接：固件缓存未知，下次发送重推数据
+    m_lastFrames.clear(); m_lastIsList = false;
     // 注意：不在连接时自动查询固件版本（命令 10）。固件 v20.x 尚未实现命令 10，
     // 自动下发会触发 AA AD/ERR_USB_BADFRAME 报错；改为仅在「帮助→关于」点击时查询。
     flushTx(QStringLiteral("连接初始化"));
@@ -1659,6 +1661,35 @@ void MainWindow::onSend()
     doSend();
 }
 
+// 统一发送：模式未变不发 SET_MODE，数据未变不发数据帧，总是发 TX_START。
+// 固件的“发送模式”与“缓存数据”全局唯一，所有页面共用此缓存 → 跨页面一致。
+void MainWindow::sendCachedFrames(bool listMode, const QVector<QByteArray> &frames,
+                                  quint32 trig, int intervalMs)
+{
+    const int mode = listMode ? (int)proto::MODE_FRAMELIST : (int)proto::MODE_SINGLE;
+    if (m_lastMode != mode) {
+        queueCommand(proto::CMD_SET_MODE, (quint32)mode,
+                     QStringLiteral("发送模式 %1").arg(listMode ? "列表" : "单帧"));
+        m_lastMode = mode;
+        m_lastInit = false;                 // 模式切换：缓存源不同，强制重推数据
+    }
+    if (intervalMs >= 0 && (!m_lastInit || m_lastInterval != intervalMs)) {
+        queueCommand(proto::CMD_SET_INTERVAL, (quint32)intervalMs,
+                     QStringLiteral("周期 %1 ms").arg(intervalMs));
+        m_lastInterval = intervalMs;
+    }
+    const bool changed = !m_lastInit || m_lastIsList != listMode || m_lastFrames != frames;
+    if (changed) {
+        for (const QByteArray &f : frames)
+            queueBytes(f, listMode ? QStringLiteral("列表帧") : QStringLiteral("单帧"));
+        m_lastInit = true;
+        m_lastIsList = listMode;
+        m_lastFrames = frames;
+    }
+    queueCommand(proto::CMD_TX_START, trig,
+                 QStringLiteral("触发发送 (%1)").arg(trig ? "连续" : "单次"));
+}
+
 QString MainWindow::doSend()
 {
     QString info;
@@ -1669,24 +1700,8 @@ QString MainWindow::doSend()
         return QStringLiteral("empty; changed=0 ptrig=0");
     }
 
-    bool changed = !m_lastInit ||
-                   (m_lastIsList != p.isList) ||
-                   (m_lastFrames != p.frames);
-
     const quint32 trig = m_loopBox->isChecked() ? 1u : 0u;
-    const int mode = p.isList ? (int)proto::MODE_FRAMELIST : (int)proto::MODE_SINGLE;
     const int interval = m_intervalSpin->value();
-
-    if (!m_lastInit || m_lastMode != mode) {
-        queueCommand(proto::CMD_SET_MODE, (quint32)mode,
-                     QStringLiteral("发送模式 %1").arg(p.isList ? "列表" : "单帧"));
-        m_lastMode = mode;
-    }
-    if (!m_lastInit || m_lastInterval != interval) {
-        queueCommand(proto::CMD_SET_INTERVAL, (quint32)interval,
-                     QStringLiteral("周期 %1 ms").arg(interval));
-        m_lastInterval = interval;
-    }
 
     // 无论数据是否变化，都在滚动区打印"要发送的帧"（仅显示，不代表真实下发）。
     for (const QByteArray &f : p.frames) {
@@ -1695,20 +1710,9 @@ QString MainWindow::doSend()
             appendScroll(QStringLiteral("TX"), rx);
     }
 
-    if (changed) {
-        // 仅在数据变化时，才把数据帧打包发给 MCU
-        for (const QByteArray &f : p.frames) {
-            queueBytes(f, p.isList ? QStringLiteral("列表帧") : QStringLiteral("单帧"));
-        }
-        m_lastInit = true;
-        m_lastIsList = p.isList;
-        m_lastFrames = p.frames;
-    }
-    // 数据未变化：不重发数据帧，实际只下发下面的 TX_START 命令（MCU 重发其缓存帧）
+    const bool changed = !m_lastInit || m_lastIsList != p.isList || m_lastFrames != p.frames;
 
-    queueCommand(proto::CMD_TX_START, trig,
-                 QStringLiteral("触发发送 (%1)").arg(trig ? "连续" : "单次"));
-
+    sendCachedFrames(p.isList, p.frames, trig, interval);
     flushTx(QStringLiteral("打包发送"));
 
     return QStringLiteral("%1; changed=%2 ptrig=%3")
@@ -1998,21 +2002,11 @@ void MainWindow::onSimpleSend()
     const QVector<QByteArray> frames = buildSimpleFrames(&err);
     if (frames.isEmpty()) { logWarn(QStringLiteral("无法发送：%1").arg(err)); return; }
 
-    const int ex = curSimpleExample();
-    if (ex >= 0) {                       // 实战示例：多帧序列（列表模式）
-        queueCommand(proto::CMD_SET_MODE, proto::MODE_FRAMELIST, QStringLiteral("发送模式 列表"));
-        for (const QByteArray &f : frames) queueBytes(f, QStringLiteral("示例帧"));
-        queueCommand(proto::CMD_TX_START, 0u, QStringLiteral("触发发送 (单次)"));
+    if (curSimpleExample() >= 0) {       // 实战示例：多帧序列（列表模式）
+        sendCachedFrames(true, frames, 0u);
         flushTx(QStringLiteral("实战示例发送"));
-    } else {                             // 普通命令：单帧（数据变才打包）
-        const QByteArray &f = frames.first();
-        const bool changed = (!m_simpleLastInit || m_simpleLastFrame != f);
-        queueCommand(proto::CMD_SET_MODE, proto::MODE_SINGLE, QStringLiteral("发送模式 单帧"));
-        if (changed) {
-            queueBytes(f, QStringLiteral("Simple 数据帧"));
-            m_simpleLastFrame = f; m_simpleLastInit = true;
-        }
-        queueCommand(proto::CMD_TX_START, 0u, QStringLiteral("触发发送 (单次)"));
+    } else {                             // 普通命令：单帧
+        sendCachedFrames(false, frames, 0u);
         flushTx(QStringLiteral("Simple 发送"));
     }
 
@@ -2765,9 +2759,7 @@ void MainWindow::onCoSend()
         QString err;
         const QVector<QByteArray> frames = buildCoFrames(&err);
         if (frames.isEmpty()) { logWarn(QStringLiteral("无法发送：%1").arg(err)); return; }
-        queueCommand(proto::CMD_SET_MODE, proto::MODE_FRAMELIST, QStringLiteral("发送模式 列表"));
-        for (const QByteArray &f : frames) queueBytes(f, QStringLiteral("示例帧"));
-        queueCommand(proto::CMD_TX_START, 0u, QStringLiteral("触发发送 (单次)"));
+        sendCachedFrames(true, frames, 0u);
         flushTx(QStringLiteral("CANopen 示例发送"));
         for (const QByteArray &f : frames) {
             proto::RxFrame rx;
@@ -2784,9 +2776,7 @@ void MainWindow::onCoSend()
         QVector<QByteArray> all;
         for (const CoListEntry &e : m_coListModel)
             for (const QByteArray &f : e.frames) all.append(f);
-        queueCommand(proto::CMD_SET_MODE, proto::MODE_FRAMELIST, QStringLiteral("发送模式 列表"));
-        for (const QByteArray &f : all) queueBytes(f, QStringLiteral("命令列表帧"));
-        queueCommand(proto::CMD_TX_START, 0u, QStringLiteral("触发发送 (单次)"));
+        sendCachedFrames(true, all, 0u);
         flushTx(QStringLiteral("CANopen 列表发送"));
         for (const QByteArray &f : all) {
             proto::RxFrame rx;
@@ -2800,19 +2790,8 @@ void MainWindow::onCoSend()
     const QVector<QByteArray> frames = buildCoFrames(&err);
     if (frames.isEmpty()) { logWarn(QStringLiteral("无法发送：%1").arg(err)); return; }
 
-    if (curCoExample() >= 0) {                       // 实战示例：序列（列表模式）
-        queueCommand(proto::CMD_SET_MODE, proto::MODE_FRAMELIST, QStringLiteral("发送模式 列表"));
-        for (const QByteArray &f : frames) queueBytes(f, QStringLiteral("示例帧"));
-        queueCommand(proto::CMD_TX_START, 0u, QStringLiteral("触发发送 (单次)"));
-        flushTx(QStringLiteral("CANopen 示例发送"));
-    } else {                                         // 普通功能：单帧（数据变才打包）
-        const QByteArray &f = frames.first();
-        const bool changed = (!m_coLastInit || m_coLastFrame != f);
-        queueCommand(proto::CMD_SET_MODE, proto::MODE_SINGLE, QStringLiteral("发送模式 单帧"));
-        if (changed) { queueBytes(f, QStringLiteral("CANopen 帧")); m_coLastFrame = f; m_coLastInit = true; }
-        queueCommand(proto::CMD_TX_START, 0u, QStringLiteral("触发发送 (单次)"));
-        flushTx(QStringLiteral("CANopen 发送"));
-    }
+    sendCachedFrames(false, frames, 0u);             // 普通功能：单帧
+    flushTx(QStringLiteral("CANopen 发送"));
     for (const QByteArray &f : frames) {
         proto::RxFrame rx;
         if (proto::decodeDataFrame(f, &rx)) coAppendScroll(QStringLiteral("TX"), rx);
@@ -3014,6 +2993,8 @@ void MainWindow::queueCommand(proto::Cmd cmd, quint32 value, const QString &note
 {
     queueBytes(proto::buildCommand(cmd, value), note);
 }
+
+void MainWindow::flushTxNow() { flushTx(QString()); }
 
 void MainWindow::flushTx(const QString &note)
 {

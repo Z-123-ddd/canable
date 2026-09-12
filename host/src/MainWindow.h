@@ -101,6 +101,11 @@ public:
 
     // 导出已勾选记录为 CSV 文本（不含写文件）；供 UI 与无头自测校验
     QString buildExportCsv() const;
+    // 统一的发送缓存（模式未变不发 SET_MODE，数据未变不发数据帧，总是发 TX_START）；
+    // 供各页面与自测调用。
+    void sendCachedFrames(bool listMode, const QVector<QByteArray> &frames,
+                          quint32 trig, int intervalMs = -1);
+    void flushTxNow();   // 立即写出队列（供自测）
 
 private slots:
     void refreshPorts();
@@ -192,6 +197,8 @@ private:
     void queueBytes(const QByteArray &bytes, const QString &note);
     void queueCommand(proto::Cmd cmd, quint32 value, const QString &note);
     void flushTx(const QString &note);
+    // 统一的发送缓存：模式未变不发 SET_MODE，数据未变不发数据帧，总是发 TX_START。
+    // 固件的“当前发送模式/缓存数据”全局唯一，故所有页面共用此缓存（跨页面一致）。
     void logWarn(const QString &text);          // 写入日志区（警告）
     void logError(const QString &text);         // 写入日志区（报错）
     void logInfo(const QString &text);          // 状态提示（写状态栏，不进日志）
@@ -281,7 +288,7 @@ private:
     bool m_lastInit = false;
     bool m_lastIsList = false;
     QVector<QByteArray> m_lastFrames;
-    int  m_lastMode = -1;        // 上次下发的发送模式 (0 单帧 / 1 列表)
+    int  m_lastMode = -1;        // 固件当前发送模式 (0 单帧 / 1 列表)；-1=未知
     int  m_lastInterval = -1;    // 上次下发的周期 ms
 
     QPlainTextEdit *m_log = nullptr;
