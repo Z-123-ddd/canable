@@ -16,6 +16,7 @@
 #include "n32h47x_48x_flash.h"
 #include "n32h47x_48x_pwr.h"
 #include "n32h47x_48x_dma.h"
+#include "n32h47x_48x_usart.h"
 #include "n32h47x_48x_exti.h"
 #include "n32h47x_48x_misc.h"
 

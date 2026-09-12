@@ -435,6 +435,16 @@
               <FilePath>..\src\error.c</FilePath>
             </File>
             <File>
+              <FileName>rs485.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\src\rs485.c</FilePath>
+            </File>
+            <File>
+              <FileName>workmode.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\src\workmode.c</FilePath>
+            </File>
+            <File>
               <FileName>interrupts.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\src\interrupts.c</FilePath>

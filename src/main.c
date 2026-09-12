@@ -18,6 +18,8 @@
 #include "error.h"
 #include "usbd_cdc_if.h"
 #include "dfu.h"
+#include "rs485.h"
+#include "workmode.h"
 
 // Firmware identification (kept for future reporting commands)
 char* fw_id = GIT_VERSION " " GIT_REMOTE "\r";
@@ -36,6 +38,7 @@ int main(void)
     can_timer_init();
     led_init();
     usb_init();
+    rs485_init(115200);   // RS485 (USART1 PA9/PA10 + DE PC6), DMA TX/RX
 
     // Power-on blink sequence
     led_blue_blink(2);
@@ -60,7 +63,13 @@ int main(void)
                 usb_proto_send_error((error_t)pending_err);
         }
 
-        cdc_process();
+        cdc_process();   // USB command channel (kept alive in both modes)
+
+        // CAN-only tasks run only in CAN mode; in RS485 mode the FDCAN
+        // controller/interrupts/timer are stopped and the RS485 sits in its
+        // default (receive) state.
+        if (workmode_get() != WORK_MODE_CAN)
+            continue;
 
         // Auto bitrate scan: cycle candidate rates while the bus shows error
         // activity but no frame is being received; on lock, report it to the

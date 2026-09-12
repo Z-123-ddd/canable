@@ -20,6 +20,7 @@
 #include "usb_proto.h"
 #include "can.h"
 #include "can_timer.h"
+#include "workmode.h"
 #include "dfu.h"
 #include "error.h"
 #include "usbd_cdc_if.h"
@@ -186,6 +187,14 @@ static void proto_cmd_dispatch(void)
         case USB_PROTO_CMD_ID_SET_DATA_BITRATE:
             if (can_apply_data_bitrate_hz(value) != 0)
                 error_assert(ERR_USB_BADFRAME);   // unsupported data rate
+            break;
+
+        case USB_PROTO_CMD_ID_SET_WORK_MODE:
+            // value = 0 CAN / 1 RS485. Other values are refused.
+            if (value == WORK_MODE_CAN || value == WORK_MODE_RS485)
+                workmode_set((uint8_t)value);
+            else
+                error_assert(ERR_USB_BADFRAME);
             break;
 
         case USB_PROTO_CMD_ID_SET_INTERVAL:

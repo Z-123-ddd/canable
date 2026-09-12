@@ -69,6 +69,11 @@
 //   id 8: set the CAN FD data-phase bitrate. value = data bitrate in Hz
 //         (2000000 / 5000000); other values are refused (ERR_USB_BADFRAME).
 #define USB_PROTO_CMD_ID_SET_DATA_BITRATE 8
+//   id 9: switch the debugger work mode. value = 0 CAN (default) / 1 RS485;
+//         other values are refused (ERR_USB_BADFRAME). Switching to RS485 stops
+//         the CAN state machine / interrupts / timer and brings RS485 up in the
+//         receive state; switching back to CAN releases RS485 and restarts FDCAN.
+#define USB_PROTO_CMD_ID_SET_WORK_MODE 9
 
 // Allowed range (ms) for the SET_INTERVAL command value.
 #define USB_PROTO_TX_INTERVAL_MIN_MS  1U
