@@ -11,7 +11,7 @@
 #ifndef GIT_VERSION_H
 #define GIT_VERSION_H
 
-#define GIT_VERSION  "v1.1.2-keil"
+#define GIT_VERSION  "v20.0.1-keil"
 #define GIT_REMOTE   "github.com/Z-123-ddd/canable.git"
 
 #endif /* GIT_VERSION_H */

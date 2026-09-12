@@ -40,6 +40,10 @@ enum can_bitrate {
 #define CAN_BITRATE_HZ_5000K    5000000U
 #define CAN_BITRATE_HZ_83_3K    83333U
 
+// CAN FD data-phase bitrate values in Hz (compared by can_apply_data_bitrate_hz)
+#define CAN_DATA_BITRATE_HZ_2M  2000000U
+#define CAN_DATA_BITRATE_HZ_5M  5000000U
+
 
 // CANFD data bitrates
 enum can_data_bitrate {
@@ -126,6 +130,10 @@ can_send_mode_t can_get_send_mode(void);
 // value is not supported. Restarts the bus when it is already open so the
 // new rate takes effect immediately.
 int32_t can_apply_bitrate_hz(uint32_t hz);
+
+// Apply a CAN FD data-phase bitrate given in Hz (2000000 / 5000000). Returns 0
+// on success, -1 when unsupported. Restarts the bus when already open.
+int32_t can_apply_data_bitrate_hz(uint32_t hz);
 
 // ---- Auto bitrate scan (bus-error triggered) ----
 // Call every main-loop iteration. Watches the FDCAN error counters; when bus

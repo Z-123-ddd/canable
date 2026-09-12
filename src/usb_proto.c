@@ -183,6 +183,11 @@ static void proto_cmd_dispatch(void)
                 error_assert(ERR_USB_BADFRAME);   // unsupported rate
             break;
 
+        case USB_PROTO_CMD_ID_SET_DATA_BITRATE:
+            if (can_apply_data_bitrate_hz(value) != 0)
+                error_assert(ERR_USB_BADFRAME);   // unsupported data rate
+            break;
+
         case USB_PROTO_CMD_ID_SET_INTERVAL:
             // value = desired periodic send interval in ms (1..1000). Reject
             // out-of-range values like an unsupported bitrate; the timer

@@ -205,17 +205,10 @@ void can_init(void)
     can_handle.TransmitPause = DISABLE;
     can_handle.ProtocolException = DISABLE;
 
-    // CAN bit timing (will be updated by can_set_bitrate)
-    can_handle.Prescaler = 1;
-    can_handle.SyncJumpWidth = 2;
-    can_handle.TimeSeg1 = 34;
-    can_handle.TimeSeg2 = 5;
-
-    // CAN FD data bit timing
-    can_handle.DataPrescaler = 1;
-    can_handle.DataSyncJumpWidth = 1;
-    can_handle.DataTimeSeg1 = 14;
-    can_handle.DataTimeSeg2 = 5;
+    // Bit timing (nominal + FD data) is NOT preset here: can_hw_start() copies
+    // the values set by can_set_bitrate() / can_set_data_bitrate() into
+    // can_handle immediately before FDCAN_Init(), and can_hw_start() is the only
+    // caller of FDCAN_Init(). Presetting them here would be dead/misleading.
 
     // Message RAM configuration
     can_handle.MsgRamStrAddr = (uint32_t)FDCAN_ram;
@@ -512,6 +505,33 @@ int32_t can_apply_bitrate_hz(uint32_t hz)
     else
     {
         can_set_bitrate(match);
+    }
+    return 0;
+}
+
+
+int32_t can_apply_data_bitrate_hz(uint32_t hz)
+{
+    // Exact Hz match against the supported CAN FD data-phase rates.
+    enum can_data_bitrate match;
+    if (hz == CAN_DATA_BITRATE_HZ_2M)
+        match = CAN_DATA_BITRATE_2M;
+    else if (hz == CAN_DATA_BITRATE_HZ_5M)
+        match = CAN_DATA_BITRATE_5M;
+    else
+        return -1;
+
+    if (bus_state == ON_BUS)
+    {
+        // Hot-reconfigure the data-phase timing without dropping the TX cache
+        // (same approach as can_apply_bitrate_hz for the nominal rate).
+        can_hw_stop();
+        can_set_data_bitrate(match);
+        can_hw_start();
+    }
+    else
+    {
+        can_set_data_bitrate(match);
     }
     return 0;
 }

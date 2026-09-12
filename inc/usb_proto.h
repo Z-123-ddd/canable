@@ -66,6 +66,9 @@
 //   id 7: select the send mode. value = 0 single frame / 1 frame list;
 //         other values are refused (ERR_USB_BADFRAME).
 #define USB_PROTO_CMD_ID_SET_MODE     7
+//   id 8: set the CAN FD data-phase bitrate. value = data bitrate in Hz
+//         (2000000 / 5000000); other values are refused (ERR_USB_BADFRAME).
+#define USB_PROTO_CMD_ID_SET_DATA_BITRATE 8
 
 // Allowed range (ms) for the SET_INTERVAL command value.
 #define USB_PROTO_TX_INTERVAL_MIN_MS  1U
