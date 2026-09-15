@@ -10,6 +10,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QAbstractItemView>
+#include <QScreen>
+#include <QGuiApplication>
 
 namespace {
 int sdoTypeFromOdType(const QString &dt)
@@ -30,6 +32,13 @@ ObjectDictionaryDialog::ObjectDictionaryDialog(QWidget *parent)
 {
     setWindowTitle(QStringLiteral("CANopen 对象字典（ds402.eds）"));
     resize(820, 600);
+    if (QScreen *sc = screen() ? screen() : QGuiApplication::primaryScreen()) {
+        const QRect a = sc->availableGeometry();
+        const int w = qMin(width(), a.width() * 90 / 100);
+        const int h = qMin(height(), a.height() * 90 / 100);
+        resize(w, h);
+        move(a.center() - QPoint(w / 2, h / 2));
+    }
 
     auto *root = new QVBoxLayout(this);
 

@@ -36,8 +36,14 @@ typedef struct _usbrx_buf_ {
 // USB initialization
 void usb_init(void);
 
-// CDC transmit function
+// CDC transmit function (all-or-nothing; asserts ERR_FULLBUF_USBTX on fail)
 void cdc_transmit(uint8_t *buf, uint16_t len);
+
+// Free bytes in the USB TX ring (one slot kept empty).
+uint32_t cdc_tx_free(void);
+// Discard up to nbytes of the oldest queued TX data to make room (e.g. so a
+// GET_STATUS reply is not starved behind a backlog of CAN RX reports).
+void cdc_tx_drop_oldest(uint32_t nbytes);
 
 // CDC process function (call in main loop)
 void cdc_process(void);

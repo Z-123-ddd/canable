@@ -13,6 +13,8 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QTime>
+#include <QScreen>
+#include <QGuiApplication>
 
 // ============================================================================
 //  FlashWorker
@@ -47,6 +49,13 @@ FirmwareDialog::FirmwareDialog(const dfu::Info &info, QWidget *parent)
 {
     setWindowTitle(QStringLiteral("固件更新 (DFU)"));
     resize(560, 420);
+    if (QScreen *sc = screen() ? screen() : QGuiApplication::primaryScreen()) {
+        const QRect a = sc->availableGeometry();
+        const int w = qMin(width(), a.width() * 90 / 100);
+        const int h = qMin(height(), a.height() * 90 / 100);
+        resize(w, h);
+        move(a.center() - QPoint(w / 2, h / 2));
+    }
 
     auto *root = new QVBoxLayout(this);
 

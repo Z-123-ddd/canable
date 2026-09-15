@@ -27,7 +27,7 @@
 |---|---|
 | `AA AA` | **命令帧**（host → MCU 控制命令） |
 | `AA AB` | **数据帧**（host → MCU 发送一帧 CAN / CAN FD） |
-| `AA AC` | **响应帧**（MCU → host；如波特率锁定回报，见 §14） |
+| `AA AC` | **响应帧**（MCU → host；波特率锁定 / 版本 / TEC·REC，见 §14） |
 | `AA AD` | **警告/报错帧**（MCU → host；ASCII 错误码，见 §15） |
 
 - 首个字节必须是 `0xAA`；第二个字节为 `0xAA`(命令) 或 `0xAB`(数据)，否则帧被丢弃，解析器在下个 `0xAA` 处重新同步。
@@ -49,6 +49,8 @@
 | `6` | SET_INTERVAL | 发送间隔(ms) | 设置周期发送间隔，范围 **1–1000 ms**（整数）；越界置 `ERR_USB_BADFRAME`。用于命令 2（连续/列表周期发送）的间隔；重载定时器不影响已入队帧或运行中的任务 |
 | `7` | SET_MODE | `0`=单帧 / `1`=列表 | 选择发送模式：`0` 单帧（每次数据帧覆盖单帧缓存）/ `1` 列表（数据帧 FIFO 追加到 pending，最多 20 帧）。其他值置 `ERR_USB_BADFRAME`。建议在发数据帧前设置 |
 | `8` | SET_DATA_BITRATE | 数据域波特率(Hz) | 设置 **CAN FD 数据段波特率**（`2000000` / `5000000`）；其他值置 `ERR_USB_BADFRAME`。总线开启时**热重配**（同命令 1，不清空发送缓存）。与命令 1（仲裁段）**互相独立** |
+| `9` | SET_WORK_MODE | `0`=CAN / `1`=RS485 | 切换调试器工作模式。切到 RS485 会停 CAN 状态机/中断/定时器并拉起 RS485 接收；切回 CAN 则释放 RS485 并重启 FDCAN |
+| `10` | GET_VERSION | — | MCU 回固件版本：`AA AC 02 \| LEN(1) \| TEXT(ASCII)`（`GIT_VERSION`） |
 
 ### 支持的波特率
 
@@ -59,32 +61,32 @@
 
 ## 4. 数据帧（`AA AB`）
 
-格式：
+格式（**v30.x 线序**）：
 
 ```
-AA AB | ID (2B 或 4B) | CTRL (1B) | DATA (0..64B) | CRC (2B 或 3B)
+AA AB | CTRL (1B) | ID (2B 或 4B) | DATA (0..64B) | CRC (2B 或 3B)
 ```
 
-### 4.1 ID 字段
+> 旧版曾为 `ID | CTRL`；v30.x 起为 **`CTRL | ID`**，CRC 覆盖范围随之变更。
 
-ID 字节数由当前 **ID 格式配置**决定（默认标准 11-bit）：
-
-| ID 格式 | 字节数 | ID 位宽 | 说明 |
-|---|---|---|---|
-| STANDARD（默认） | 2 | 11-bit | ID 以 2 字节大端承载 |
-| EXTENDED | 4 | 29-bit | ID 以 4 字节大端承载 |
-
-> ⚠️ ID 格式当前**固定为 STANDARD**（11-bit）；尚无对应 USB 命令，同一时刻只能解析一种格式。
-
-### 4.2 CTRL 控制字节
+### 4.1 CTRL 控制字节
 
 | 位 | 掩码 | 含义 |
 |---|---|---|
 | 7 | `0x80` | `FDF`：1 = CAN FD 帧；0 = 经典 CAN |
 | 6 | `0x40` | `BRS`：FD 帧位速率切换（仅 FD 有效） |
 | 5 | `0x20` | `RTR`：远程帧请求（仅经典帧有效） |
-| 4 | — | 保留（应为 0） |
+| 4 | `0x10` | **`IDE`**：1 = 扩展 ID（4 字节）；0 = 标准 ID（2 字节） |
 | 3..0 | `0x0F` | `DLC`：帧数据长度码（0..15） |
+
+### 4.2 ID 字段
+
+| CTRL.IDE | 字节数 | ID 位宽 | 说明 |
+|---|---|---|---|
+| 0（标准） | 2 | 11-bit | ID 以 2 字节大端承载 |
+| 1（扩展） | 4 | 29-bit | ID 以 4 字节大端承载 |
+
+ID 宽度由**本帧 CTRL.IDE** 决定（收发均如此），不再依赖单独的全局 ID 格式配置命令。
 
 ### 4.3 DLC → 字节数
 
@@ -99,7 +101,7 @@ ID 字节数由当前 **ID 格式配置**决定（默认标准 11-bit）：
 
 - 经典帧 CRC = 2 字节；FD 帧 CRC = 3 字节。
 - 远程帧（经典 RTR=1）无 DATA 字节（`data_bytes=0`），但仍带 CRC。
-- CRC 覆盖范围为**线序上的 ID + CTRL + DATA**（不含帧头、不含 CRC 自身）。
+- CRC 覆盖范围为**线序上的 CTRL + ID + DATA**（不含帧头、不含 CRC 自身）。
 
 ---
 
@@ -122,12 +124,12 @@ ID 字节数由当前 **ID 格式配置**决定（默认标准 11-bit）：
 固件维护 **RAM 中的发送源缓存**，数据帧只写入缓存、**不会立即上总线**；实际发送由命令帧触发：
 
 - **单帧模式**（默认）：每次数据帧覆盖"最近一帧"缓存；`TX_START` 后按 SINGLE（发一次）/ CONTINUOUS（定时周期重发最近帧）发送。
-- **列表模式**：用命令 7（`SET_MODE`，value=1）切换到 FRAMELIST 后，一串数据帧按 FIFO 追加到 **pending 缓存**（上限 20 帧，超出置 `ERR_FRAMELIST_FULL`）；`TX_START` 时：
+- **列表模式**：用命令 7（`SET_MODE`，value=1）切换到 FRAMELIST 后，一串数据帧按 FIFO 追加到 **pending 缓存**（上限 20 帧，超出丢弃并置 `ERR_CAN_TXFAIL`）；`TX_START` 时：
   - pending 非空 → 整体**替换**为新的播放列表（active）；
   - pending 为空（数据未变、仅发命令）→ **沿用上次播放列表**；
   - SINGLE = 列表按 FIFO 发一遍即停；CONTINUOUS = 按定时器间隔循环发整个列表。
 
-> 发送模式可用命令 7（`SET_MODE`）在运行时切换（默认单帧），定时器周期可用命令 6（`SET_INTERVAL`）设置（默认 1ms）。ID 格式固定为 STANDARD（11-bit）。
+> 发送模式可用命令 7（`SET_MODE`）在运行时切换（默认单帧），定时器周期可用命令 6（`SET_INTERVAL`）设置（默认 1ms）。标准/扩展 ID 由每帧 **CTRL.IDE** 决定。
 
 **定时器发送**：周期发送由 GTIM1 驱动，一旦启动即从 RAM 取帧，**不依赖 USB 持续喂数据**（上位机只需发一次数据+一次 `TX_START`）。
 
@@ -169,9 +171,9 @@ GET_STATUS 的 `err` 字段为 32 位错误寄存器的低 8 位十六进制，�
 | 6 | ERR_FULLBUF_USBTX | USB TX 缓冲满 |
 | 7 | ERR_USB_BADFRAME | 未知命令 / 畸形帧 |
 | 8 | ERR_USB_CRC | 数据帧 CRC 校验失败 |
-| 9 | ERR_FRAMELIST_FULL | 列表模式一组长于 20 帧被拒 |
+| 9 | ERR_FRAMELIST_FULL | （历史保留；列表溢出现走 `ERR_CAN_TXFAIL`） |
 
-错误位一旦置位即**保持**（直到复位/重新上电），可作调试指示。
+错误位一般保持至复位；**`ERR_CANRXFIFO_OVERFLOW` 在 RX 队列排空后可清除**。
 
 ---
 
@@ -223,16 +225,16 @@ GET_STATUS 的 `err` 字段为 32 位错误寄存器的低 8 位十六进制，�
 总线收到的 CAN / CAN FD 帧以**与发送方向完全相同的二进制数据帧格式**上报：
 
 ```
-AA AB | ID (2B 或 4B) | CTRL (1B) | DATA (0..64B) | CRC (2B 或 3B)
+AA AB | CTRL (1B) | ID (2B 或 4B) | DATA (0..64B) | CRC (2B 或 3B)
 ```
 
 各字段与发送数据帧（§4）一致：
 
 - **帧头**：`AA AB`（与发送数据帧相同；上位机按方向区分收发）。
-- **ID**：宽度按**实际收到帧**的类型决定——标准帧 2 字节、扩展帧 4 字节（大端）；**不受**发送侧 ID 格式配置影响。
-- **CTRL**：bit7 `FDF`、bit6 `BRS`、bit5 `RTR`、bits3..0 `DLC`（同 §4.2）。
+- **CTRL**：bit7 `FDF`、bit6 `BRS`、bit5 `RTR`、bit4 `IDE`、bits3..0 `DLC`（同 §4.1）。
+- **ID**：宽度由本帧 **CTRL.IDE** 决定——标准 2 字节、扩展 4 字节（大端）。
 - **DATA**：长度由 DLC 推导（经典 ≤8、FD ≤64，映射见 §4.3）；经典远程帧无 DATA。
-- **CRC**：与发送侧相同算法——经典 2 字节（CRC-15），FD 3 字节（CRC-17/21），覆盖 ID + CTRL + DATA（见 §5）。
+- **CRC**：与发送侧相同算法——经典 2 字节（CRC-15），FD 3 字节（CRC-17/21），覆盖 **CTRL + ID + DATA**（见 §5）。
 
 > 硬件过滤器接收全部标准 + 扩展帧；上报按每个帧**自身的类型**编码，上位机据此可还原总线上的原始帧。
 
@@ -242,9 +244,9 @@ AA AB | ID (2B 或 4B) | CTRL (1B) | DATA (0..64B) | CRC (2B 或 3B)
 
 **发送一帧标准 ID 0x123、经典 2 字节 `DE AD` 并单次发送**
 
-1. 发数据帧（ID 2B = `01 23`，CTRL：FDF=0/BRS=0/RTR=0/DLC=2 → `0x02`，DATA = `DE AD`，CRC15 覆盖 `01 23 02 DE AD`）：
+1. 发数据帧（CTRL：FDF=0/BRS=0/RTR=0/IDE=0/DLC=2 → `0x02`，ID 2B = `01 23`，DATA = `DE AD`，CRC15 覆盖 `02 01 23 DE AD`）：
    ```
-   AA AB 01 23 02 DE AD <CRC15:2B>
+   AA AB 02 01 23 DE AD <CRC15:2B>
    ```
 2. 发命令帧单次发送：
    ```
@@ -267,12 +269,8 @@ AA AA 06 64 00 00 00      ; 100 = 0x64，小端
 
 ```
 AA AA 07 01 00 00 00      ; SET_MODE: 1 = 列表模式
-AA AB 00 01 08 FF FF FF FF FF FF FF FA 79 F1   ; 帧1  ID=1 数据 FF..FA
-AA AB 00 01 08 FF FF FF FF FF FF FF FB 3C 68   ; 帧2  FF..FB
-AA AB 00 01 08 FF FF FF FF FF FF FF FC 6F 95   ; 帧3  FF..FC
-AA AB 00 01 08 FF FF FF FF FF FF FF FD 2A 0C   ; 帧4  FF..FD
-AA AB 00 01 08 FF FF FF FF FF FF FF FE 21 3E   ; 帧5  FF..FE
-AA AB 00 01 08 FF FF FF FF FF FF FF FF 64 A7   ; 帧6  FF..FF
+AA AB 08 00 01 FF FF FF FF FF FF FF FF <CRC15>   ; 帧1  CTRL=08 ID=1 数据 FF.. 
+AA AB 08 00 01 FF FF FF FF FF FF FF FF <CRC15>   ; 帧2 …
 AA AA 02 00 00 00 00      ; TX_START value=0 单次：列表按 FIFO 发一遍
 ```
 
@@ -333,6 +331,24 @@ AA AC | 01 | BITRATE (4B 小端)
 | BITRATE | 锁定的仲裁段波特率，单位 Hz，4 字节小端 uint32 |
 
 示例（锁定 500k）：`AA AC 01 20 A1 07 00`
+
+### 14.3 错误计数上报（AA AC 03）
+
+当 TEC 或 REC 非零时，主循环主动上报：
+
+```
+AA AC | 03 | TEC (1B) | REC (1B) | CRC8(TEC+REC)
+```
+
+CRC-8：poly `0x07`、init 0，仅覆盖 TEC+REC。上位机状态栏通常按帧显示 TEC÷8（经典 CAN 一帧无 ACK 常见 TEC+8）。
+
+### 14.4 固件版本（AA AC 02）
+
+主机发命令 10 后：
+
+```
+AA AC | 02 | LEN (1B) | TEXT(LEN ASCII)
+```
 
 ---
 

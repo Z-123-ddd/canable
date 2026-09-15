@@ -13,14 +13,21 @@
 static uint32_t error_register = 0;
 static uint32_t error_timestamps[ERR_MAX] = {0};
 
-// Sticky pending-report bits (one per error_t). Unlike a small FIFO, a bit
- // never silently drops: the LED can light only if a report bit is also set,
-// and the main loop will eventually emit an AA AD for each pending type.
-// Re-asserts of the same type while still pending coalesce (no flood).
-static volatile uint32_t err_report_pending = 0;
+// Per-type pending report counts. Each new report increments; the main
+// loop pops one AA AD per count (saturates at 65535).
+static volatile uint16_t err_report_count[ERR_MAX];
 
 
-// Assert an error condition (and mark it for deferred host reporting)
+static void error_stamp_and_queue(error_t err, uint8_t queue_report)
+{
+    error_register |= (1u << err);
+    error_timestamps[err] = system_get_ticks();
+    if (queue_report && err_report_count[err] < 0xFFFFu)
+        err_report_count[err]++;
+}
+
+
+// Assert an error condition (always queues a host report)
 void error_assert(error_t err)
 {
     if ((uint32_t)err >= (uint32_t)ERR_MAX)
@@ -28,11 +35,37 @@ void error_assert(error_t err)
 
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    error_stamp_and_queue(err, 1u);
+    __set_PRIMASK(primask);
+}
 
-    error_register |= (1u << err);
-    error_timestamps[err] = system_get_ticks();
-    err_report_pending |= (1u << err);
 
+// Sticky raise: AA AD only on 0->1 transition (keeps bit set while condition lasts)
+void error_raise(error_t err)
+{
+    if ((uint32_t)err >= (uint32_t)ERR_MAX)
+        return;
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    uint32_t bit = (1u << err);
+    uint8_t rising = (error_register & bit) ? 0u : 1u;
+    error_stamp_and_queue(err, rising);
+
+    __set_PRIMASK(primask);
+}
+
+
+// Clear a sticky error bit (does not emit a host report)
+void error_clear(error_t err)
+{
+    if ((uint32_t)err >= (uint32_t)ERR_MAX)
+        return;
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    error_register &= ~(1u << err);
     __set_PRIMASK(primask);
 }
 
@@ -43,18 +76,11 @@ int error_take_pending(void)
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
 
-    if (err_report_pending == 0)
-    {
-        __set_PRIMASK(primask);
-        return -1;
-    }
-
     for (uint8_t i = 0; i < ERR_MAX; i++)
     {
-        uint32_t bit = (1u << i);
-        if (err_report_pending & bit)
+        if (err_report_count[i] > 0u)
         {
-            err_report_pending &= ~bit;
+            err_report_count[i]--;
             __set_PRIMASK(primask);
             return (int)i;
         }

@@ -16,6 +16,8 @@
 #include <QTimer>
 #include <QSettings>
 #include <QCoreApplication>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QGroupBox>
@@ -1182,20 +1184,48 @@ int main(int argc, char *argv[])
     }
 
     // GUI 烧机自检：host.exe --guitest
-    //   打开主窗口 -> 短暂运行（可模拟发送/滚动显示）-> 自动关闭退出；用于每次编译后验证 GUI 可开可关
+    //   打开主窗口 -> 校验窗口落在可用屏幕内 -> 短暂运行 -> 自动关闭
+    //   打包脚本在必要时可调用，验证 GUI 可开可关且布局未跑出屏幕
     for (int i = 1; i < argc; i++) {
         if (QString::fromLocal8Bit(argv[i]) == "--guitest") {
             QCoreApplication::setOrganizationName(QStringLiteral("CANable2-N32-guitest"));
             QCoreApplication::setApplicationName(QStringLiteral("canable2_guitest"));
             MainWindow w;
             w.show();
+            w.raise();
+            w.activateWindow();
+
+            bool layoutOk = true;
+            QString layoutMsg;
+            if (QScreen *sc = w.screen() ? w.screen() : QGuiApplication::primaryScreen()) {
+                const QRect avail = sc->availableGeometry();
+                const QRect g = w.frameGeometry();
+                if (!avail.intersects(g)) {
+                    layoutOk = false;
+                    layoutMsg = QStringLiteral("window outside available screen");
+                } else if (w.width() < 400 || w.height() < 300) {
+                    layoutOk = false;
+                    layoutMsg = QStringLiteral("window too small: %1x%2")
+                                    .arg(w.width()).arg(w.height());
+                } else {
+                    layoutMsg = QStringLiteral("geom=%1,%2 %3x%4 avail=%5x%6")
+                                    .arg(g.x()).arg(g.y()).arg(g.width()).arg(g.height())
+                                    .arg(avail.width()).arg(avail.height());
+                }
+            } else {
+                layoutOk = false;
+                layoutMsg = QStringLiteral("no primary screen");
+            }
+            std::fputs(("GUITEST layout: " + layoutMsg + "\n").toLocal8Bit().constData(), stdout);
+
             QTimer::singleShot(1500, &app, [&]() {
-                w.close();                 // 触发 closeEvent（保存设置路径）
+                w.close();
                 app.quit();
             });
             const int rc = app.exec();
-            std::fputs(rc == 0 ? "GUITEST: OK\n" : "GUITEST: FAIL\n", stdout);
-            return rc;
+            const bool ok = (rc == 0) && layoutOk;
+            std::fputs(ok ? "GUITEST: OK\n" : "GUITEST: FAIL\n", stdout);
+            return ok ? 0 : 1;
         }
     }
 

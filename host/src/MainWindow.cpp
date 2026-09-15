@@ -1,4 +1,4 @@
-#include "MainWindow.h"
+﻿#include "MainWindow.h"
 #include "TraceImporter.h"
 #include "SerialLink.h"
 #include "UsbLink.h"
@@ -50,6 +50,58 @@
 #include <QStackedWidget>
 #include <QListWidget>
 #include <QSize>
+#include <QSplitter>
+#include <QScreen>
+#include <QGuiApplication>
+#include <QApplication>
+#include <QSizePolicy>
+
+// ---------------------------------------------------------------------------
+//  相对尺寸：以当前字号为基准，避免固定像素在不同分辨率/DPI 下错位
+// ---------------------------------------------------------------------------
+static int uiEm(const QWidget *w)
+{
+    const int h = w ? w->fontMetrics().height() : QApplication::fontMetrics().height();
+    return qMax(12, h);
+}
+
+static QSplitter *makeHSplit(QWidget *left, QWidget *right, int stretchL = 3, int stretchR = 2)
+{
+    auto *sp = new QSplitter(Qt::Horizontal);
+    sp->setChildrenCollapsible(false);
+    sp->setOpaqueResize(true);
+    sp->addWidget(left);
+    sp->addWidget(right);
+    sp->setStretchFactor(0, stretchL);
+    sp->setStretchFactor(1, stretchR);
+    // 初始相对比例（与 stretch 一致），随窗口缩放
+    QList<int> sizes;
+    sizes << stretchL * 100 << stretchR * 100;
+    sp->setSizes(sizes);
+    return sp;
+}
+
+static void fitWindowToScreen(QWidget *win)
+{
+    if (!win) return;
+    QScreen *sc = win->screen();
+    if (!sc) sc = QGuiApplication::primaryScreen();
+    if (!sc) {
+        win->resize(1024, 640);
+        return;
+    }
+    const QRect avail = sc->availableGeometry();
+    const int em = uiEm(win);
+    const int minW = qMin(qMax(em * 56, 720), avail.width());
+    const int minH = qMin(qMax(em * 32, 480), avail.height());
+    win->setMinimumSize(minW, minH);
+
+    const int w = qBound(minW, avail.width() * 85 / 100, avail.width() - em);
+    const int h = qBound(minH, avail.height() * 85 / 100, avail.height() - em);
+    win->resize(w, h);
+    win->move(avail.x() + (avail.width() - w) / 2,
+              avail.y() + (avail.height() - h) / 2);
+}
 
 // ---------------------------------------------------------------------------
 //  CAN 波特率下拉项（显示名 -> Hz）
@@ -186,7 +238,7 @@ MainWindow::MainWindow(QWidget *parent)
     fg->addWidget(new QLabel(QStringLiteral("ID(hex):")), 0, 0);
     m_idEdit = new QLineEdit;                       // 默认空
     m_idEdit->setObjectName("idEdit");
-    m_idEdit->setMinimumWidth(140);
+    m_idEdit->setMinimumWidth(uiEm(this) * 8);
     m_idEdit->setMinimumHeight(tallerHeight(m_idEdit));   // 高度 ×1.5
     fg->addWidget(m_idEdit, 0, 1);
 
@@ -208,16 +260,19 @@ MainWindow::MainWindow(QWidget *parent)
     fg->addWidget(new QLabel(QStringLiteral("数据(hex):")), 1, 0);
     m_dataEdit = new HexLineEdit;                   // 默认空（自动大写 + 每字节空格）
     m_dataEdit->setObjectName("dataEdit");
-    m_dataEdit->setMinimumWidth(8 * 3 * 8);         // 能完整显示 >=8 字节
+    m_dataEdit->setMinimumWidth(uiEm(this) * 16);   // 相对字号，约够显示 8 字节 hex
     m_dataEdit->setMinimumHeight(tallerHeight(m_dataEdit));   // 高度 ×1.5
     m_dataEdit->setClearButtonEnabled(true);
     fg->addWidget(m_dataEdit, 1, 1, 1, 7);
+    fg->setColumnStretch(1, 1);
+    fg->setColumnStretch(7, 1);
 
     lv->addWidget(frameBox);
 
     // ---------------- 发送列表（表格） ----------------
     auto *listBox = new QGroupBox(QStringLiteral("发送列表 (勾选决定发送：≥2 列表 / 1 单帧 / 0 用编辑区；最多 20 行)"));
     auto *llv = new QVBoxLayout(listBox);
+    llv->setSpacing(6);
     m_table = new QTableWidget(0, COL_COUNT);
     m_table->setObjectName("table");
     m_table->setHorizontalHeaderLabels({
@@ -230,12 +285,22 @@ MainWindow::MainWindow(QWidget *parent)
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->verticalHeader()->setVisible(false);
-    m_table->setMinimumHeight(300);
+    m_table->setMinimumHeight(uiEm(this) * 8);
+    // 垂直方向可伸缩，但不得挤掉下方按钮行（由按钮行 Fixed + stretch=0 保证）
+    m_table->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_table->setItemDelegateForColumn(COL_DATA, new HexDelegate(this));   // 数据列：自动大写 + 每字节空格
     resetTable();                 // 默认 20 行空表格
-    llv->addWidget(m_table);
+    llv->addWidget(m_table, /*stretch*/ 1);
 
-    auto *lb = new QHBoxLayout;
+    // 按钮行：独立控件 + 固定高度，始终贴在表格正下方，不被表格覆盖
+    auto *btnRow = new QWidget(listBox);
+    btnRow->setObjectName("listBtnRow");
+    btnRow->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    auto *lb = new QHBoxLayout(btnRow);
+    lb->setContentsMargins(0, 4, 0, 0);
+    lb->setSpacing(8);
     m_resetBtn = new QPushButton(QStringLiteral("重置列表"));
     m_resetBtn->setObjectName("resetBtn");
     m_exportBtn = new QPushButton(QStringLiteral("导出CSV"));
@@ -249,9 +314,9 @@ MainWindow::MainWindow(QWidget *parent)
     lb->addWidget(m_importBtn);
     lb->addWidget(m_exportBtn);
     lb->addWidget(hint);
-    lb->addStretch();
-    llv->addLayout(lb);
-    lv->addWidget(listBox);
+    lb->addStretch(1);
+    llv->addWidget(btnRow, /*stretch*/ 0);
+    lv->addWidget(listBox, 3);   // 列表区随窗口伸缩
 
     // ---------------- 操作 ----------------
     auto *opBox = new QGroupBox(QStringLiteral("操作"));
@@ -268,8 +333,6 @@ MainWindow::MainWindow(QWidget *parent)
 
     // ---------------- 日志（每页各一份，状态共享；[0] 即本页=规范）----------------
     lv->addWidget(buildLogGroup(), 1);
-
-    root->addWidget(left, 3);
 
     // ======================= 右列：接收 =======================
     auto *rxBox = new QGroupBox(QStringLiteral("接收区"));
@@ -312,7 +375,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_rxTable->setFrameShape(QFrame::NoFrame);                       // 无外框
     m_rxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
     m_rxTable->verticalHeader()->setVisible(false);
-    m_rxTable->setMinimumWidth(420);
+    m_rxTable->setMinimumWidth(uiEm(this) * 18);
+    m_rxTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     rv->addWidget(makeRxFilterRow(QStringLiteral("can.rx"), m_rxTable,
         { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
           QStringLiteral("数据"), QStringLiteral("次数") }));
@@ -332,7 +396,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_scrollTable->setFrameShape(QFrame::NoFrame);
     m_scrollTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
     m_scrollTable->verticalHeader()->setVisible(false);
-    m_scrollTable->setMinimumWidth(420);
+    m_scrollTable->setMinimumWidth(uiEm(this) * 18);
     m_scrollTable->setVisible(false);
     rv->addWidget(makeRxFilterRow(QStringLiteral("can.scroll"), m_scrollTable,
         { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
@@ -346,10 +410,16 @@ MainWindow::MainWindow(QWidget *parent)
     rb->addStretch();
     rv->addLayout(rb);
 
-    root->addWidget(rxBox, 2);
+    root->setContentsMargins(6, 6, 6, 6);
+    root->addWidget(makeHSplit(left, rxBox, 3, 2), 1);
 
     m_statusLbl = new QLabel(QStringLiteral("未连接"));
     statusBar()->addWidget(m_statusLbl);
+    m_errCntLbl = new QLabel(QStringLiteral("TEC:0  REC:0"));
+    m_errCntLbl->setObjectName("errCntLbl");
+    m_errCntLbl->setMinimumWidth(uiEm(this) * 10);
+    m_errCntLbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    statusBar()->addPermanentWidget(m_errCntLbl);   // 靠右
 
     // ---------------- 顶部菜单栏 ----------------
     auto *protoMenu = menuBar()->addMenu(QStringLiteral("协议(&P)"));
@@ -455,7 +525,6 @@ MainWindow::MainWindow(QWidget *parent)
         lcl->addWidget(dataBox);
 
         lcl->addWidget(buildLogGroup(), 1);
-        rsroot->addWidget(lcol, 3);
 
         // ---- 接收区（与通用CAN一致：就地/滚动 + 清空）----
         auto *rxBox = new QGroupBox(QStringLiteral("接收区"));
@@ -490,7 +559,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_rs485RxTable->setFrameShape(QFrame::NoFrame);
         m_rs485RxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_rs485RxTable->verticalHeader()->setVisible(false);
-        m_rs485RxTable->setMinimumWidth(420);
+        m_rs485RxTable->setMinimumWidth(uiEm(this) * 18);
         rv->addWidget(makeRxFilterRow(QStringLiteral("rs485.rx"), m_rs485RxTable,
             { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
               QStringLiteral("数据"), QStringLiteral("次数") }));
@@ -510,7 +579,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_rs485ScrollTable->setFrameShape(QFrame::NoFrame);
         m_rs485ScrollTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_rs485ScrollTable->verticalHeader()->setVisible(false);
-        m_rs485ScrollTable->setMinimumWidth(420);
+        m_rs485ScrollTable->setMinimumWidth(uiEm(this) * 18);
         m_rs485ScrollTable->setVisible(false);
         rv->addWidget(makeRxFilterRow(QStringLiteral("rs485.scroll"), m_rs485ScrollTable,
             { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
@@ -523,7 +592,8 @@ MainWindow::MainWindow(QWidget *parent)
         rb->addWidget(m_rs485ClearRxBtn);
         rb->addStretch();
         rv->addLayout(rb);
-        rsroot->addWidget(rxBox, 2);
+        rsroot->setContentsMargins(6, 6, 6, 6);
+        rsroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
     }
     // ---------------- 协议调试页栈（CAN 页内：CyberBeast / Simple / Open / 通用CAN）----------------
     m_pageProtoCyberBeast = new QWidget;
@@ -569,7 +639,7 @@ MainWindow::MainWindow(QWidget *parent)
             m_simpleCmdBox->addItem(QStringLiteral("★ %1").arg(e.name), e.mainCmd);
             m_simpleCmdBox->setItemData(m_simpleCmdBox->count() - 1, i, Qt::UserRole + 1);
         }
-        m_simpleCmdBox->setMinimumWidth(280);
+        m_simpleCmdBox->setMinimumWidth(uiEm(this) * 14);
         cg->addWidget(m_simpleCmdBox, 1, 1, 1, 3);
         lcl->addWidget(cBox);
 
@@ -600,7 +670,6 @@ MainWindow::MainWindow(QWidget *parent)
         sop->addStretch();
         lcl->addLayout(sop);
         lcl->addWidget(buildLogGroup(), 1);
-        sroot->addWidget(lcol, 3);
 
         // ---------- 右：接收区（与通用 CAN UI 一致）----------
         auto *srxBox = new QGroupBox(QStringLiteral("接收区"));
@@ -635,7 +704,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_simpleRxTable->setFrameShape(QFrame::NoFrame);
         m_simpleRxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_simpleRxTable->verticalHeader()->setVisible(false);
-        m_simpleRxTable->setMinimumWidth(420);
+        m_simpleRxTable->setMinimumWidth(uiEm(this) * 18);
         srv->addWidget(makeRxFilterRow(QStringLiteral("simple.rx"), m_simpleRxTable,
             { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
               QStringLiteral("数据"), QStringLiteral("次数") }));
@@ -655,7 +724,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_simpleScrollTable->setFrameShape(QFrame::NoFrame);
         m_simpleScrollTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_simpleScrollTable->verticalHeader()->setVisible(false);
-        m_simpleScrollTable->setMinimumWidth(420);
+        m_simpleScrollTable->setMinimumWidth(uiEm(this) * 18);
         m_simpleScrollTable->setVisible(false);
         srv->addWidget(makeRxFilterRow(QStringLiteral("simple.scroll"), m_simpleScrollTable,
             { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
@@ -668,7 +737,8 @@ MainWindow::MainWindow(QWidget *parent)
         srb->addWidget(m_simpleClearRxBtn);
         srb->addStretch();
         srv->addLayout(srb);
-        sroot->addWidget(srxBox, 2);
+        sroot->setContentsMargins(6, 6, 6, 6);
+        sroot->addWidget(makeHSplit(lcol, srxBox, 3, 2), 1);
 
         rebuildSimpleParams();
         simpleSetRxMode(false);
@@ -711,7 +781,7 @@ MainWindow::MainWindow(QWidget *parent)
                                      (int)canopen::F_COUNT);
                 m_coFuncBox->setItemData(m_coFuncBox->count() - 1, i, Qt::UserRole + 1);
             }
-            m_coFuncBox->setMinimumWidth(280);
+            m_coFuncBox->setMinimumWidth(uiEm(this) * 14);
         }
         fg->addWidget(m_coFuncBox, 1, 1, 1, 3);
         lcl->addWidget(fBox);
@@ -773,7 +843,6 @@ MainWindow::MainWindow(QWidget *parent)
         sop->addStretch();
         lcl->addLayout(sop);
         lcl->addWidget(buildLogGroup(), 1);
-        oroot->addWidget(lcol, 3);
 
         // ---- 右：接收区（与通用CAN/Simple 一致）----
         auto *rxBox = new QGroupBox(QStringLiteral("接收区"));
@@ -808,7 +877,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_coRxTable->setFrameShape(QFrame::NoFrame);
         m_coRxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_coRxTable->verticalHeader()->setVisible(false);
-        m_coRxTable->setMinimumWidth(420);
+        m_coRxTable->setMinimumWidth(uiEm(this) * 18);
         rv->addWidget(makeRxFilterRow(QStringLiteral("co.rx"), m_coRxTable,
             { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
               QStringLiteral("数据"), QStringLiteral("次数") }));
@@ -828,7 +897,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_coScrollTable->setFrameShape(QFrame::NoFrame);
         m_coScrollTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
         m_coScrollTable->verticalHeader()->setVisible(false);
-        m_coScrollTable->setMinimumWidth(420);
+        m_coScrollTable->setMinimumWidth(uiEm(this) * 18);
         m_coScrollTable->setVisible(false);
         rv->addWidget(makeRxFilterRow(QStringLiteral("co.scroll"), m_coScrollTable,
             { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
@@ -841,7 +910,8 @@ MainWindow::MainWindow(QWidget *parent)
         crb->addWidget(m_coClearRxBtn);
         crb->addStretch();
         rv->addLayout(crb);
-        oroot->addWidget(rxBox, 2);
+        oroot->setContentsMargins(6, 6, 6, 6);
+        oroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
 
         rebuildCoParams();
         coSetRxMode(false);
@@ -864,7 +934,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_modeStack->addWidget(pageCan);        // index 0 = CAN
     m_modeStack->addWidget(m_pageRs485);    // index 1 = RS485
     setCentralWidget(m_modeStack);
-    resize(1520, 880);
+    fitWindowToScreen(this);
 
     // ---------------- 信号连接 ----------------
     // （连接区的 刷新/打开/更新固件/传输切换 由 buildConnGroup() 内部接线）
@@ -1002,7 +1072,7 @@ QGroupBox *MainWindow::buildConnGroup()
     h->addWidget(transport);
     h->addWidget(new QLabel(QStringLiteral("端口:")));
     auto *port = new QComboBox;
-    port->setMinimumWidth(200);
+    port->setMinimumWidth(uiEm(this) * 12);
     h->addWidget(port);
     auto *refresh = new QPushButton(QStringLiteral("刷新"));
     h->addWidget(refresh);
@@ -1181,8 +1251,7 @@ void MainWindow::onPortOpened(const QString &name)
     m_lastMode = (int)proto::MODE_SINGLE;
     m_lastInit = false;        // 刚连接：固件缓存未知，下次发送重推数据
     m_lastFrames.clear(); m_lastIsList = false;
-    // 注意：不在连接时自动查询固件版本（命令 10）。固件 v20.x 尚未实现命令 10，
-    // 自动下发会触发 AA AD/ERR_USB_BADFRAME 报错；改为仅在「帮助→关于」点击时查询。
+    // 连接时不自动查版本；「帮助→关于」会发命令 10（GET_VERSION）。
     flushTx(QStringLiteral("连接初始化"));
     logInfo(QStringLiteral("已连接(%1) %2").arg(m_link->kind(), name));
 }
@@ -1193,6 +1262,8 @@ void MainWindow::onPortClosed()
     m_openBtn->setText(QStringLiteral("打开"));
     syncConnUi();                       // 所有页面的「关闭」按钮都恢复「打开」
     m_statusLbl->setText(QStringLiteral("未连接"));
+    if (m_errCntLbl)
+        m_errCntLbl->setText(QStringLiteral("TEC:0  REC:0"));
     logInfo(QStringLiteral("已断开。"));
 }
 
@@ -2935,7 +3006,7 @@ void MainWindow::onAbout()
 #define APP_VERSION "unknown"
 #endif
         const QString devFw = m_deviceFwVersion.isEmpty()
-            ? QStringLiteral("未知（固件未实现命令 10）") : m_deviceFwVersion;
+            ? QStringLiteral("未知（未收到版本回包）") : m_deviceFwVersion;
         QMessageBox::about(this, QStringLiteral("关于"),
             QStringLiteral("<b>CyberBeast CANable 2 上位机</b><br>软件版本：%1<br>设备固件版本：%2")
                 .arg(QStringLiteral(APP_VERSION), devFw));
@@ -3163,6 +3234,16 @@ void MainWindow::onResponseReceived(const proto::RxResponse &r)
                 break;
             }
         }
+    } else if (r.id == proto::RSP_ERR_CNT) {
+        if (m_errCntLbl) {
+            // 硬件计数按错误规则累加（ACK 失败 TEC 常 +8）；界面按帧数显示：÷8
+            const int tecFrames = (int)r.tec / 8;
+            const int recFrames = (int)r.rec / 8;
+            QString t = QStringLiteral("TEC:%1  REC:%2").arg(tecFrames).arg(recFrames);
+            if (!r.crcOk)
+                t += QStringLiteral(" (CRC?)");
+            m_errCntLbl->setText(t);
+        }
     } else {
         logInfo(QStringLiteral("AA AC id=%1 value=%2").arg(r.id).arg(r.value));
     }
@@ -3213,11 +3294,13 @@ QString MainWindow::scrollText() const
 }
 
 // ---------------------------------------------------------------------------
-//  持久化（QSettings）：保存/恢复全部可填项（不含窗口几何）
+//  持久化（QSettings）：保存/恢复全部可填项与窗口几何
 // ---------------------------------------------------------------------------
 void MainWindow::saveSettings()
 {
     QSettings st;
+    st.setValue(QStringLiteral("ui/geometry"), saveGeometry());
+    st.setValue(QStringLiteral("ui/windowState"), saveState());
     st.setValue("table/rows", m_table->rowCount());
     for (int r = 0; r < m_table->rowCount(); r++) {
         const QString p = QStringLiteral("table/%1/").arg(r);
@@ -3320,6 +3403,23 @@ void MainWindow::saveSettings()
 void MainWindow::loadSettings()
 {
     QSettings st;
+    const QByteArray geo = st.value(QStringLiteral("ui/geometry")).toByteArray();
+    if (!geo.isEmpty() && restoreGeometry(geo)) {
+        if (QScreen *sc = screen() ? screen() : QGuiApplication::primaryScreen()) {
+            const QRect avail = sc->availableGeometry();
+            const QRect g = frameGeometry();
+            if (!avail.contains(g.center())
+                || g.width() > avail.width() + 8
+                || g.height() > avail.height() + 8) {
+                fitWindowToScreen(this);
+            }
+        }
+    } else {
+        fitWindowToScreen(this);
+    }
+    const QByteArray wst = st.value(QStringLiteral("ui/windowState")).toByteArray();
+    if (!wst.isEmpty())
+        restoreState(wst);
     // 发送表
     const int rows = st.value("table/rows", kDefaultRows).toInt();
     m_table->setRowCount(0);

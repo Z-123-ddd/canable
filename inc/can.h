@@ -104,8 +104,9 @@ enum can_bus_state {
 
 
 // Cirbuf structure for CAN RX frames
-//   producer: can_rx_isr() (FDCAN ISR, may overwrite oldest on overflow)
-//   consumer: can_rx()     (main loop)
+//   producer: can_rx_isr() (FDCAN ISR, overwrites oldest on overflow and
+//             raises sticky ERR_CANRXFIFO_OVERFLOW)
+//   consumer: can_rx()     (main loop; clears overflow bit after a dequeue)
 typedef struct canrxbuf_ {
     uint8_t data[RXQUEUE_LEN][RXQUEUE_DATALEN];
     FDCAN_RxHeaderType header[RXQUEUE_LEN];
@@ -156,10 +157,11 @@ uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data);
 void can_rx_isr(void);        // FDCAN1_INT0 ISR: drain HW FIFO into software RX queue
 void can_send_timer_tick(void);  // periodic timer ISR (see can.c state machine)
 // Report a CAN bus fault to the host (reads FDCAN protocol status; called from
-// the Bus-Off ISR). Asserts ERR_CAN_ACK when the last error was a missing ACK
-// (e.g. no other node on the bus), otherwise ERR_CAN_BUSOFF (severe fault).
+// the Bus-Off ISR). Non-ACK Bus-Off asserts ERR_CAN_BUSOFF. ACK faults are
+// reported per TX attempt via can_report_ack_error() (PEA), not again here.
 void can_report_bus_error(void);
 // Called from the protocol-error ISR: assert ERR_CAN_ACK when LEC/DLEC is ACK.
+// In single-frame mode also aborts leftover TX FIFO entries (no HW retry).
 void can_report_ack_error(void);
 uint8_t is_can_msg_pending(uint8_t fifo);
 
@@ -184,5 +186,10 @@ uint32_t can_tx_drop_count(void);
 // Format a one-line ASCII status report (host GET_STATUS command).
 // Writes at most max-1 bytes + NUL; returns the length.
 uint16_t can_format_status(char *buf, uint16_t max);
+
+// Poll FDCAN TEC/REC for unsolicited host reporting.
+// Returns 1 and writes *tec/*rec when a report should be sent (either counter
+// non-zero and value changed, or still non-zero after ~200 ms). Returns 0 otherwise.
+uint8_t can_err_cnt_poll(uint8_t *tec, uint8_t *rec);
 
 #endif // _CAN_H

@@ -35,7 +35,9 @@ static FDCAN_InitType can_handle;
 static uint32_t prescaler, sync_jump_width, time_seg1, time_seg2;
 static uint32_t data_prescaler, data_sync_jump_width, data_time_seg1, data_time_seg2;
 enum can_bus_state bus_state;
-static uint8_t can_autoretransmit = ENABLE;
+// Single-frame mode: DAR (no HW auto-retry) so one TX task = one attempt.
+// Frame-list mode: keep auto-retransmission for burst reliability.
+static uint8_t can_autoretransmit = DISABLE;
 
 // Binary USB protocol configuration (defaults used until a command changes them)
 static can_id_format_t can_id_format = CAN_ID_FORMAT_STANDARD;
@@ -143,9 +145,26 @@ can_id_format_t can_get_id_format(void)
     return can_id_format;
 }
 
+static void can_hw_start(void);
+static void can_hw_stop(void);
+
 void can_set_send_mode(can_send_mode_t mode)
 {
+    uint8_t want_ar = (mode == CAN_SEND_MODE_SINGLE) ? (uint8_t)DISABLE
+                                                     : (uint8_t)ENABLE;
+    if (mode == can_send_mode && want_ar == can_autoretransmit)
+        return;
+
     can_send_mode = mode;
+    can_autoretransmit = want_ar;
+    can_handle.AutoRetransmission = want_ar;
+
+    // CCCR.DAR is latched at FDCAN_Init; re-apply when the bus is already open.
+    if (bus_state == ON_BUS)
+    {
+        can_hw_stop();
+        can_hw_start();
+    }
 }
 
 can_send_mode_t can_get_send_mode(void)
@@ -256,6 +275,7 @@ static void can_hw_start(void)
     can_handle.DataSyncJumpWidth = data_sync_jump_width;
     can_handle.DataTimeSeg1 = data_time_seg1;
     can_handle.DataTimeSeg2 = data_time_seg2;
+    can_handle.AutoRetransmission = can_autoretransmit;
 
     // Initialize FDCAN
     FDCAN_Init(FDCAN1, &can_handle);
@@ -680,28 +700,40 @@ static uint8_t can_tx_hw(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
     return 0;
 }
 
-// Report missing-ACK (called from protocol-error ISR). Does not stop TX —
-// Bus-Off handler still owns recovery if TEC climbs to Bus-Off.
+// Report missing-ACK (called from protocol-error ISR).
+// Single-frame mode runs with DAR: one attempt then cancel — report once and
+// abort any leftover TX FIFO entries so the next TX_START can enqueue.
+// List mode keeps auto-retransmit; only report, do not cancel the job here.
 void can_report_ack_error(void)
 {
     FDCAN_ProtocolStatus ps;
     FDCAN_GetProtocolStatus(FDCAN1, &ps);
-    if (ps.LastError == FDCAN_LAST_ERROR_ACK ||
-        ps.LastDataError == FDCAN_LAST_DATA_ERROR_ACK)
-        error_assert(ERR_CAN_ACK);
+    if (ps.LastError != FDCAN_LAST_ERROR_ACK &&
+        ps.LastDataError != FDCAN_LAST_DATA_ERROR_ACK)
+        return;
+
+    error_assert(ERR_CAN_ACK);
+
+    if (can_send_mode == CAN_SEND_MODE_SINGLE)
+    {
+        // Abort all TX FIFO slots (size 8) so a failed frame does not block.
+        FDCAN_AbortTxRequest(FDCAN1,
+                             FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 |
+                             FDCAN_TX_BUFFER2 | FDCAN_TX_BUFFER3 |
+                             FDCAN_TX_BUFFER4 | FDCAN_TX_BUFFER5 |
+                             FDCAN_TX_BUFFER6 | FDCAN_TX_BUFFER7);
+    }
 }
 
 // Report a CAN bus fault to the host (called from the Bus-Off ISR).
-//   missing ACK  -> ERR_CAN_ACK
+//   missing ACK  -> stop TX only (ACK already reported per attempt via PEA)
 //   other severe -> ERR_CAN_BUSOFF
 void can_report_bus_error(void)
 {
     FDCAN_ProtocolStatus ps;
     FDCAN_GetProtocolStatus(FDCAN1, &ps);
-    if (ps.LastError == FDCAN_LAST_ERROR_ACK ||
-        ps.LastDataError == FDCAN_LAST_DATA_ERROR_ACK)
-        error_assert(ERR_CAN_ACK);
-    else
+    if (ps.LastError != FDCAN_LAST_ERROR_ACK &&
+        ps.LastDataError != FDCAN_LAST_DATA_ERROR_ACK)
         error_assert(ERR_CAN_BUSOFF);
 
     // Stop a running TX job so continuous send into an empty bus cannot
@@ -824,7 +856,8 @@ void can_tx_stop(void)
 
 // Drain the FDCAN hardware Rx FIFO 0 into the software RX queue.
 // Called from the FDCAN1_INT0 ISR only (single producer).
-// If the software ring is full the OLDEST queued frame is overwritten.
+// If the software ring is full the OLDEST queued frame is overwritten and
+// ERR_CANRXFIFO_OVERFLOW is raised (sticky until the host drains via can_rx).
 void can_rx_isr(void)
 {
     while (FDCAN_GetRxFifoFillLevel(FDCAN1, FDCAN_RX_FIFO0) > 0)
@@ -835,7 +868,7 @@ void can_rx_isr(void)
             // Software ring full -> drop the oldest frame by advancing tail,
             // then store the new frame over the freed slot.
             rxqueue.tail = (uint16_t)((rxqueue.tail + 1) % RXQUEUE_LEN);
-            error_assert(ERR_CANRXFIFO_OVERFLOW);
+            error_raise(ERR_CANRXFIFO_OVERFLOW);
         }
 
         if (FDCAN_GetRxMsg(FDCAN1, FDCAN_RX_FIFO0,
@@ -855,7 +888,8 @@ void can_rx_isr(void)
 
 // Receive a CAN message from the software RX queue (drained by main loop).
 // Critical section guards against the FDCAN ISR overwriting the oldest frame
-// while it is being copied out.
+// while it is being copied out. After a successful dequeue the RX-overflow
+// sticky bit is cleared — host is taking data and the module recovers.
 uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data)
 {
     __disable_irq();
@@ -878,6 +912,10 @@ uint32_t can_rx(FDCAN_RxHeaderType *rx_msg_header, uint8_t *rx_msg_data)
         rx_msg_data[i] = rxqueue.data[rxqueue.tail][i];
 
     rxqueue.tail = (uint16_t)((rxqueue.tail + 1) % RXQUEUE_LEN);
+
+    // Host drained at least one frame: clear overflow sticky bit. If the peer
+    // is still flooding and the ring fills again, can_rx_isr will raise it.
+    error_clear(ERR_CANRXFIFO_OVERFLOW);
 
     __enable_irq();
     return SUCCESS;
@@ -948,6 +986,47 @@ void can_send_timer_tick(void)
     if (!cur_tx_valid)
         return;
     can_tx_hw(&cur_tx_hdr, cur_tx_data);
+}
+
+
+// ---- Unsolicited TEC/REC reporting (AA AC id=3) ----
+#define CAN_ERR_CNT_REPORT_MS  200u
+
+uint8_t can_err_cnt_poll(uint8_t *tec, uint8_t *rec)
+{
+    static uint8_t last_tec = 0;
+    static uint8_t last_rec = 0;
+    static uint32_t last_ms = 0;
+
+    if (tec == NULL || rec == NULL)
+        return 0;
+    if (bus_state != ON_BUS)
+        return 0;
+
+    FDCAN_ErrorCounters ec;
+    FDCAN_GetErrorCounters(FDCAN1, &ec);
+    uint8_t t = (uint8_t)(ec.TxErrorCnt & 0xFFu);
+    uint8_t r = (uint8_t)(ec.RxErrorCnt & 0xFFu);
+
+    if (t == 0u && r == 0u)
+    {
+        last_tec = 0;
+        last_rec = 0;
+        return 0;
+    }
+
+    uint32_t now = system_get_ticks();
+    uint8_t changed = (t != last_tec) || (r != last_rec);
+    uint8_t due = (uint32_t)(now - last_ms) >= CAN_ERR_CNT_REPORT_MS;
+    if (!changed && !due)
+        return 0;
+
+    last_tec = t;
+    last_rec = r;
+    last_ms = now;
+    *tec = t;
+    *rec = r;
+    return 1;
 }
 
 

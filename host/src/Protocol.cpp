@@ -234,6 +234,7 @@ void Parser::feed(const QByteArray &bytes)
             m_rspId = by;
             if (by == RSP_BITRATE_LOCK) { m_buf.clear(); m_state = RSP_PAYLOAD; m_need = 4; }
             else if (by == RSP_VERSION) { m_buf.clear(); m_text.clear(); m_state = RSP_VER_LEN; m_need = 1; }
+            else if (by == RSP_ERR_CNT) { m_buf.clear(); m_state = RSP_PAYLOAD; m_need = 3; } // TEC REC CRC
             else { finishResponse(); m_state = IDLE; }
             break;
 
@@ -292,16 +293,28 @@ void Parser::feed(const QByteArray &bytes)
     }
 }
 
-// m_buf = payload[4] LE, m_rspId 已记录
+// m_buf = payload；m_rspId 已记录
 void Parser::finishResponse()
 {
     Message m;
     m.type = Message::Response;
     m.response.id = m_rspId;
-    uint32_t v = 0;
-    for (int i = 0; i < m_buf.size() && i < 4; i++)
-        v |= (uint32_t)(uint8_t)m_buf[i] << (8 * i);
-    m.response.value = v;
+    m.response.crcOk = true;
+    if (m_rspId == RSP_ERR_CNT && m_buf.size() >= 3) {
+        m.response.tec = (uint8_t)m_buf[0];
+        m.response.rec = (uint8_t)m_buf[1];
+        const uint8_t got = (uint8_t)m_buf[2];
+        uint8_t cov[2] = { m.response.tec, m.response.rec };
+        m.response.crcOk = (crc8(cov, 2) == got);
+        m.response.value = (uint32_t)m.response.tec
+                         | ((uint32_t)m.response.rec << 8);
+        m.crcOk = m.response.crcOk;
+    } else {
+        uint32_t v = 0;
+        for (int i = 0; i < m_buf.size() && i < 4; i++)
+            v |= (uint32_t)(uint8_t)m_buf[i] << (8 * i);
+        m.response.value = v;
+    }
     m.response.text = m_text;   // RSP_VERSION 的 ASCII（其余为空）
     m_msgs.append(m);
     m_buf.clear();
@@ -556,6 +569,29 @@ bool selfTest(QString *report)
               msgs[0].response.id == RSP_VERSION &&
               msgs[0].response.text == QStringLiteral("v20.0.2"),
               "AA AC 版本响应解析 (id=2)");
+    }
+
+    // 14. AA AC 错误计数（id=3）：AA AC 03 | TEC | REC | CRC8(TEC+REC)
+    {
+        uint8_t tec = 12, rec = 34;
+        uint8_t cov[2] = { tec, rec };
+        QByteArray e;
+        e.append(char(0xAA)); e.append(char(0xAC)); e.append(char(RSP_ERR_CNT));
+        e.append(char(tec)); e.append(char(rec)); e.append(char(crc8(cov, 2)));
+        Parser ps; ps.feed(e);
+        auto msgs = ps.takeMessages();
+        check(msgs.size() == 1 && msgs[0].type == Message::Response &&
+              msgs[0].response.id == RSP_ERR_CNT &&
+              msgs[0].response.tec == tec && msgs[0].response.rec == rec &&
+              msgs[0].response.crcOk,
+              "AA AC 错误计数 TEC/REC 解析 (id=3)");
+        // CRC 错误仍解析，但 crcOk=false
+        e[5] = char((uint8_t)e[5] ^ 0xFF);
+        Parser ps2; ps2.feed(e);
+        auto bad = ps2.takeMessages();
+        check(bad.size() == 1 && bad[0].response.id == RSP_ERR_CNT &&
+              !bad[0].response.crcOk,
+              "AA AC 错误计数 CRC 错误标记");
     }
 
     if (report) *report = log;

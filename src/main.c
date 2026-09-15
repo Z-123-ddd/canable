@@ -6,6 +6,11 @@
  *   - Receives binary command/data frames via USB CDC
  *   - Parses and transmits CAN/CANFD frames
  *   - Receives CAN/CANFD frames and reports them as binary frames via USB
+ *
+ * Scheduling note: never drain the CAN RX soft-queue in an unbounded loop.
+ * A peer that floods heartbeats before the host opens the port used to keep
+ * while(is_can_msg_pending) busy forever, starving cdc_process() so GET_STATUS
+ * / open never ran — the module looked "frozen" after the host finally connected.
  */
 
 #include "n32h47x_48x.h"
@@ -21,8 +26,9 @@
 #include "rs485.h"
 #include "workmode.h"
 
-// Firmware identification (kept for future reporting commands)
-char* fw_id = GIT_VERSION " " GIT_REMOTE "\r";
+// Bound work per main-loop turn so USB command handling stays responsive.
+#define MAIN_ERR_BURST   2
+#define MAIN_RX_BURST    8
 
 
 int main(void)
@@ -56,14 +62,22 @@ int main(void)
     {
         led_process();
 
-        // Report any newly-asserted errors to the host as AA AD warning frames.
+        // Report a few pending errors (AA AD); do not drain the whole queue
+        // in one turn — that used to refill USB TX while no host was reading.
         {
             int pending_err;
-            while ((pending_err = error_take_pending()) >= 0)
+            int nerr = 0;
+            while (nerr < MAIN_ERR_BURST &&
+                   (pending_err = error_take_pending()) >= 0)
+            {
                 usb_proto_send_error((error_t)pending_err);
+                nerr++;
+            }
         }
 
-        cdc_process();   // USB command channel (kept alive in both modes)
+        // USB first every turn: drain IN backlog + parse host commands
+        // (GET_STATUS / open / bitrate) even when the CAN bus is flooding.
+        cdc_process();
 
         // CAN-only tasks run only in CAN mode; in RS485 mode the FDCAN
         // controller/interrupts/timer are stopped and the RS485 sits in its
@@ -79,25 +93,31 @@ int main(void)
         if (lock_hz >= 0)
             usb_proto_send_bitrate_lock((uint32_t)lock_hz);
 
-        // Check for received CAN messages (software RX queue filled by FDCAN ISR)
-        while (is_can_msg_pending(FDCAN_RX_FIFO0))
+        // Unsolicited TEC/REC (AA AC id=3) when either counter is non-zero
         {
-            // Read CAN frame from software RX queue
-            if (can_rx(&rx_msg_header, rx_msg_data) == SUCCESS)
-            {
-                // Encode frame into the binary RX report format (AA AB | ID | CTRL | DATA | CRC)
-                int32_t msg_len = usb_proto_encode_rx(msg_buf, sizeof(msg_buf), &rx_msg_header, rx_msg_data);
+            uint8_t tec = 0, rec = 0;
+            if (can_err_cnt_poll(&tec, &rec))
+                usb_proto_send_err_cnt(tec, rec);
+        }
 
-                // Transmit via USB CDC
-                if (msg_len > 0)
-                {
-                    cdc_transmit(msg_buf, msg_len);
-                }
-            }
-            else
-            {
+        // Push at most MAIN_RX_BURST frames to USB per turn. If the USB TX
+        // ring is nearly full (host not reading yet, or still catching up),
+        // stop and leave frames in the soft RX ring — ISR overwrite keeps
+        // the newest traffic until the host can accept more.
+        for (int i = 0; i < MAIN_RX_BURST; i++)
+        {
+            if (!is_can_msg_pending(FDCAN_RX_FIFO0))
                 break;
-            }
+            if (cdc_tx_free() < (uint32_t)USB_PROTO_MAX_FRAME)
+                break;
+
+            if (can_rx(&rx_msg_header, rx_msg_data) != SUCCESS)
+                break;
+
+            int32_t msg_len = usb_proto_encode_rx(msg_buf, sizeof(msg_buf),
+                                                  &rx_msg_header, rx_msg_data);
+            if (msg_len > 0)
+                cdc_transmit(msg_buf, (uint16_t)msg_len);
         }
     }
 }

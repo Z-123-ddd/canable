@@ -84,16 +84,22 @@ void FDCAN1_INT0_IRQHandler(void)
         can_rx_isr();
     }
 
-    // Protocol error (arbitration / data phase) -> report ACK if that was LEC
-    if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_ARB_PROTOCOL_ERROR) == SET)
+    // Protocol error (arbitration / data phase) -> one ACK report per ISR
+    // entry (avoid double-count when both PEA flags latch for one attempt).
     {
-        FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_ARB_PROTOCOL_ERROR);
-        can_report_ack_error();
-    }
-    if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_DATA_PROTOCOL_ERROR) == SET)
-    {
-        FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_DATA_PROTOCOL_ERROR);
-        can_report_ack_error();
+        uint8_t pea = 0;
+        if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_ARB_PROTOCOL_ERROR) == SET)
+        {
+            FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_ARB_PROTOCOL_ERROR);
+            pea = 1;
+        }
+        if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_DATA_PROTOCOL_ERROR) == SET)
+        {
+            FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_DATA_PROTOCOL_ERROR);
+            pea = 1;
+        }
+        if (pea)
+            can_report_ack_error();
     }
 
     // Bus-Off detected -> report to the host, stop the TX job (inside

@@ -254,7 +254,14 @@ static void proto_cmd_dispatch(void)
             char st[96];
             uint16_t n = can_format_status(st, (uint16_t)sizeof(st));
             if (n > 0)
+            {
+                // Prefer status over a backlog of CAN RX / AA AD bytes so the
+                // host is not locked out after connecting to a busy bus.
+                uint32_t free = cdc_tx_free();
+                if (free < n)
+                    cdc_tx_drop_oldest((uint32_t)n - free + 64u);
                 cdc_transmit((uint8_t *)st, n);
+            }
             break;
         }
 
@@ -465,6 +472,35 @@ void usb_proto_send_version(const char *ver)
 }
 
 
+// CRC-8, poly 0x07, init 0, MSB-first (matches the host implementation).
+static uint8_t crc8_byte(const uint8_t *p, uint16_t len)
+{
+    uint8_t c = 0;
+    for (uint16_t i = 0; i < len; i++)
+    {
+        c ^= p[i];
+        for (uint8_t b = 0; b < 8; b++)
+            c = (c & 0x80u) ? (uint8_t)((c << 1) ^ 0x07u) : (uint8_t)(c << 1);
+    }
+    return c;
+}
+
+
+// Emit CAN error counters (MCU -> host): AA AC 03 | TEC | REC | CRC8(TEC+REC).
+void usb_proto_send_err_cnt(uint8_t tec, uint8_t rec)
+{
+    uint8_t cov[2] = { tec, rec };
+    uint8_t b[6];
+    b[0] = USB_PROTO_SOF1;
+    b[1] = USB_PROTO_RSP_SOF2;
+    b[2] = USB_PROTO_RSP_ID_ERR_CNT;
+    b[3] = tec;
+    b[4] = rec;
+    b[5] = crc8_byte(cov, 2);
+    cdc_transmit(b, (uint16_t)sizeof(b));
+}
+
+
 // ---- Warning/error (AA AD) frames -----------------------------------------
 // ASCII names, index-aligned with error_t (see inc/error.h).
 static const char *const k_err_names[ERR_MAX] =
@@ -482,19 +518,6 @@ static const char *const k_err_names[ERR_MAX] =
     "ERR_CAN_ACK",
     "ERR_CAN_BUSOFF",
 };
-
-// CRC-8, poly 0x07, init 0, MSB-first (matches the host implementation).
-static uint8_t crc8_byte(const uint8_t *p, uint16_t len)
-{
-    uint8_t c = 0;
-    for (uint16_t i = 0; i < len; i++)
-    {
-        c ^= p[i];
-        for (uint8_t b = 0; b < 8; b++)
-            c = (c & 0x80u) ? (uint8_t)((c << 1) ^ 0x07u) : (uint8_t)(c << 1);
-    }
-    return c;
-}
 
 // Emit an AA AD warning/error frame: AA AD | TEXT(ASCII) | DA AA | CRC8.
 // The CRC covers TEXT only (the AA AD and DA AA delimiters are excluded).

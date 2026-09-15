@@ -129,12 +129,19 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
 #define USB_PROTO_RSP_ID_BITRATE_LOCK  1
 //   id 2: firmware version. Payload = 1-byte length + ASCII (GIT_VERSION).
 #define USB_PROTO_RSP_ID_VERSION       2
+//   id 3: CAN error counters (unsolicited). Payload = TEC(1) | REC(1) | CRC8(1).
+//         CRC-8 (poly 0x07, init 0) covers TEC+REC only. Sent by the MCU when
+//         TEC or REC is non-zero (see usb_proto_send_err_cnt / main loop poll).
+#define USB_PROTO_RSP_ID_ERR_CNT       3
 
 // Emit the "bitrate locked" response: AA AC 01 | hz[4] LE.
 void usb_proto_send_bitrate_lock(uint32_t hz);
 
 // Emit the firmware-version response: AA AC 02 | LEN | TEXT(ASCII).
 void usb_proto_send_version(const char *ver);
+
+// Emit CAN TEC/REC counters: AA AC 03 | TEC | REC | CRC8.
+void usb_proto_send_err_cnt(uint8_t tec, uint8_t rec);
 
 // ---- Warning / error frames (AA AD, MCU -> host) ----
 // Emit: AA AD | TEXT(ASCII error enum) | DA AA | CRC8.

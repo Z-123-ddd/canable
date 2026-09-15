@@ -293,6 +293,7 @@ private:
 
     QPlainTextEdit *m_log = nullptr;
     QLabel *m_statusLbl = nullptr;
+    QLabel *m_errCntLbl = nullptr;   // 状态栏右侧 TEC/REC（AA AC id=3 主动上报）
     QVector<ConnPanel> m_connPanels;   // 各页面的连接区（[0] 为规范/通用CAN）
     QVector<LogPanel>  m_logPanels;    // 各页面的日志区（[0] 为规范/通用CAN）
 

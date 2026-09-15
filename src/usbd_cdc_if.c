@@ -157,7 +157,9 @@ void cdc_transmit(uint8_t *buf, uint16_t len)
     if (free < len)
     {
         __set_PRIMASK(primask);
-        error_assert(ERR_FULLBUF_USBTX);
+        // Sticky raise (no report flood): TX full is often a consequence of
+        // CAN RX backlog before the host opens the port.
+        error_raise(ERR_FULLBUF_USBTX);
         return;
     }
 
@@ -166,6 +168,41 @@ void cdc_transmit(uint8_t *buf, uint16_t len)
         txbuf.data[txbuf.head] = buf[i];
         txbuf.head = (txbuf.head + 1) % USBTXQUEUE_LEN;
     }
+
+    // Successfully queued: clear the TX-full sticky if it was set.
+    error_clear(ERR_FULLBUF_USBTX);
+
+    __set_PRIMASK(primask);
+}
+
+
+uint32_t cdc_tx_free(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint32_t used = (txbuf.head >= txbuf.tail)
+                        ? (txbuf.head - txbuf.tail)
+                        : (USBTXQUEUE_LEN - txbuf.tail + txbuf.head);
+    uint32_t free = USBTXQUEUE_LEN - 1u - used;
+    __set_PRIMASK(primask);
+    return free;
+}
+
+
+void cdc_tx_drop_oldest(uint32_t nbytes)
+{
+    if (nbytes == 0)
+        return;
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    uint32_t used = (txbuf.head >= txbuf.tail)
+                        ? (txbuf.head - txbuf.tail)
+                        : (USBTXQUEUE_LEN - txbuf.tail + txbuf.head);
+    if (nbytes > used)
+        nbytes = used;
+    txbuf.tail = (txbuf.tail + nbytes) % USBTXQUEUE_LEN;
 
     __set_PRIMASK(primask);
 }
