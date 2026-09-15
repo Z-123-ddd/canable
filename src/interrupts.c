@@ -84,11 +84,25 @@ void FDCAN1_INT0_IRQHandler(void)
         can_rx_isr();
     }
 
-    // Bus-Off detected -> report to the host, then restart the controller
+    // Protocol error (arbitration / data phase) -> report ACK if that was LEC
+    if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_ARB_PROTOCOL_ERROR) == SET)
+    {
+        FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_ARB_PROTOCOL_ERROR);
+        can_report_ack_error();
+    }
+    if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_DATA_PROTOCOL_ERROR) == SET)
+    {
+        FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_DATA_PROTOCOL_ERROR);
+        can_report_ack_error();
+    }
+
+    // Bus-Off detected -> report to the host, stop the TX job (inside
+    // can_report_bus_error), then restart the controller for the next attempt.
     if (FDCAN_GetIntFlag(FDCAN1, FDCAN_FLAG_BUS_OFF) == SET)
     {
         FDCAN_ClearFlag(FDCAN1, FDCAN_FLAG_BUS_OFF);
         can_report_bus_error();      // AA AD: ERR_CAN_ACK / ERR_CAN_BUSOFF
+        can_timer_disable();         // continuous pump must not keep firing
         FDCAN_Start(FDCAN1);
     }
 }

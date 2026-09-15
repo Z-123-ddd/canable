@@ -35,8 +35,9 @@ typedef struct {
 void can_frame_list_init(void);
 
 // ---- pending (host data frames accumulate here) ----
+// Returns 0 on success, 1 if oldest was dropped to make room, -1 if invalid.
 int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,
-                                   const uint8_t *data); // -1 if full/invalid
+                                   const uint8_t *data);
 uint16_t can_frame_list_pending_count(void);
 
 // ---- commit (TX-start command): pending -> active, replacing the old list ----

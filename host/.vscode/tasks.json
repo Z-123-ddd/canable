@@ -1,0 +1,110 @@
+{
+    // 构建任务 (JSONC，支持注释)
+    // 依赖：CMake + Ninja + Qt6(MinGW) + libusb，均在 D 盘。
+    // 任务通过 options.env.PATH 注入 Qt/MinGW/CMake/Ninja 路径，
+    // 无需事先 source /d/Qt/qt-tools-env.sh 即可在 VS Code 里直接 Ctrl+Shift+B。
+    "version": "2.0.0",
+    "options": {
+        "env": {
+            "PATH": "D:\\Qt\\6.8.3\\mingw_64\\bin;D:\\Qt\\Tools\\mingw1310_64\\bin;D:\\Qt\\Tools\\CMake\\bin;D:\\Qt\\Tools\\Ninja;${env:PATH}"
+        }
+    },
+    "tasks": [
+        {
+            "label": "CMake: configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S", ".", "-B", "build", "-G", "Ninja",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_PREFIX_PATH=D:/Qt/6.8.3/mingw_64"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": ["CMake: configure"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"],
+            "detail": "→ build/CyberBeast-CANable2.exe"
+        },
+        {
+            "label": "Rebuild (clean + build)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--clean-first"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Clean",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["-E", "rm_rf", "build"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: --selftest",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/CyberBeast-CANable2.exe",
+            "args": ["--selftest"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": ["Build"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: --uitest",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/CyberBeast-CANable2.exe",
+            "args": ["--uitest"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": ["Build"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: --guitest",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/CyberBeast-CANable2.exe",
+            "args": ["--guitest"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": ["Build"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Package (installer / NSIS)",
+            "type": "shell",
+            "command": "bash",
+            "args": ["-lc", "source /d/Qt/qt-tools-env.sh && ./package.sh"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "detail": "需 Git-Bash/NSIS；产物 dist/CyberBeast-CANable2-Setup-<ver>.exe"
+        }
+    ]
+}

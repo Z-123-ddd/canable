@@ -57,6 +57,7 @@ static uint8_t cur_tx_valid = 0;
 static uint8_t tx_job_active = 0;          // 1 = a periodic job is being pumped
 static uint8_t tx_job_single_pass = 0;     // FRAMELIST: 1 = stop after one pass
 static uint16_t tx_list_pos = 0;           // FRAMELIST: FIFO cursor into active list
+static uint32_t tx_drop_count = 0;         // pending-list overwrites (oldest dropped)
 
 // ---- Auto bitrate scan state ----
 #define CAN_SCAN_ERR_THRESHOLD   8u     // REC/TEC at/above this => bus trouble
@@ -277,9 +278,14 @@ static void can_hw_start(void)
 
     // Enable FDCAN1 interrupts on line 0:
     //   - Rx FIFO 0 new message -> ISR drains HW FIFO into software RX queue
-    //   - Bus-Off             -> ISR restarts the CAN controller automatically
+    //   - ACK / protocol error  -> report ERR_CAN_ACK when LEC is ACK
+    //   - Bus-Off               -> ACK vs severe BUSOFF, then restart
     FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_INTERRUPT_LINE0);
     FDCAN_ActivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_TX_BUFFER0);
+    FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_ARB_PROTOCOL_ERROR, FDCAN_INTERRUPT_LINE0);
+    FDCAN_ActivateInt(FDCAN1, FDCAN_INT_ARB_PROTOCOL_ERROR, FDCAN_TX_BUFFER0);
+    FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_DATA_PROTOCOL_ERROR, FDCAN_INTERRUPT_LINE0);
+    FDCAN_ActivateInt(FDCAN1, FDCAN_INT_DATA_PROTOCOL_ERROR, FDCAN_TX_BUFFER0);
     FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_INTERRUPT_LINE0);
     FDCAN_ActivateInt(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_TX_BUFFER0);
 
@@ -300,7 +306,11 @@ static void can_hw_stop(void)
 {
     bus_state = OFF_BUS;
 
-    FDCAN_DeactivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE | FDCAN_INT_BUS_OFF);
+    FDCAN_DeactivateInt(FDCAN1,
+                        FDCAN_INT_RX_FIFO0_NEW_MESSAGE |
+                        FDCAN_INT_ARB_PROTOCOL_ERROR |
+                        FDCAN_INT_DATA_PROTOCOL_ERROR |
+                        FDCAN_INT_BUS_OFF);
     FDCAN_Stop(FDCAN1);
     FDCAN_DeInit(FDCAN1);
 }
@@ -313,6 +323,7 @@ static void can_clear_software_state(void)
     rxqueue.head = 0;
     rxqueue.tail = 0;
     cur_tx_valid = 0;
+    tx_drop_count = 0;
 
     __disable_irq();
     tx_job_active = 0;
@@ -558,9 +569,12 @@ static uint32_t can_bitrate_to_hz(enum can_bitrate b)
     }
 }
 
-// Bus trouble indicator: high error counters / error-passive. With the wrong
-// nominal bitrate but live traffic the receive error counter climbs (frames
-// fail form/stuff/CRC); at the right rate it stays low.
+// Bus trouble indicator for auto bitrate scan. Only RX-side faults count:
+// wrong nominal rate + live traffic -> form/stuff/CRC errors raise REC.
+// Do NOT use TxErrorCnt: a lone node with no ACK also raises TEC, which would
+// falsely start a scan loop (LED flickers via led_green_on on each rate
+// switch, TEC is cleared by hot-reconfig, Bus-Off/ERR_CAN_ACK never sticks,
+// status stays err=00000000 while job keeps running).
 static uint8_t can_bus_error_detected(void)
 {
     FDCAN_ErrorCounters ec;
@@ -568,8 +582,6 @@ static uint8_t can_bus_error_detected(void)
     if (ec.RxErrorPassive)
         return 1;
     if (ec.RxErrorCnt >= CAN_SCAN_ERR_THRESHOLD)
-        return 1;
-    if (ec.TxErrorCnt >= CAN_SCAN_ERR_THRESHOLD)
         return 1;
     return 0;
 }
@@ -668,18 +680,36 @@ static uint8_t can_tx_hw(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
     return 0;
 }
 
-// Report a CAN bus fault to the host (called from the Bus-Off ISR). Reads the
-// FDCAN protocol status to distinguish a missing-ACK situation (no other node
-// on the bus -> the transmit error counter climbs and the controller goes
-// bus-off) from other protocol errors (stuff/form/bit/CRC).
+// Report missing-ACK (called from protocol-error ISR). Does not stop TX —
+// Bus-Off handler still owns recovery if TEC climbs to Bus-Off.
+void can_report_ack_error(void)
+{
+    FDCAN_ProtocolStatus ps;
+    FDCAN_GetProtocolStatus(FDCAN1, &ps);
+    if (ps.LastError == FDCAN_LAST_ERROR_ACK ||
+        ps.LastDataError == FDCAN_LAST_DATA_ERROR_ACK)
+        error_assert(ERR_CAN_ACK);
+}
+
+// Report a CAN bus fault to the host (called from the Bus-Off ISR).
+//   missing ACK  -> ERR_CAN_ACK
+//   other severe -> ERR_CAN_BUSOFF
 void can_report_bus_error(void)
 {
     FDCAN_ProtocolStatus ps;
     FDCAN_GetProtocolStatus(FDCAN1, &ps);
-    if (ps.LastError == FDCAN_LAST_ERROR_ACK)
-        error_assert(ERR_CAN_ACK);      // no ACK -> likely no other node
+    if (ps.LastError == FDCAN_LAST_ERROR_ACK ||
+        ps.LastDataError == FDCAN_LAST_DATA_ERROR_ACK)
+        error_assert(ERR_CAN_ACK);
     else
-        error_assert(ERR_CAN_BUSOFF);   // other arbitration/data phase error
+        error_assert(ERR_CAN_BUSOFF);
+
+    // Stop a running TX job so continuous send into an empty bus cannot
+    // Bus-Off-storm (re-assert hundreds of times before the main loop runs).
+    // Host can TX_START again after reconnecting a peer.
+    tx_job_active = 0;
+    tx_job_single_pass = 0;
+    tx_list_pos = 0;
 }
 
 // Host data-frame entry point (called from the binary USB protocol parser).
@@ -687,7 +717,8 @@ void can_report_bus_error(void)
 // directly; a TX command (can_tx_start / future USB command) decides when
 // the cached source goes on the bus. In single mode the frame replaces the
 // 'most recent frame'; in list mode it is appended to the pending burst
-// (FIFO). A burst longer than the list capacity is refused.
+// (FIFO). When the pending list is full the oldest frame is dropped,
+// ERR_CAN_TXFAIL is asserted, and the drop counter is incremented.
 void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
 {
     if (hdr == NULL)
@@ -695,9 +726,14 @@ void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
 
     if (can_send_mode == CAN_SEND_MODE_FRAMELIST)
     {
-        // Append this frame to the pending burst (FIFO).
-        if (can_frame_list_pending_add(hdr, data) != 0)
-            error_assert(ERR_FRAMELIST_FULL);
+        int32_t rc = can_frame_list_pending_add(hdr, data);
+        if (rc < 0)
+            return;   // invalid frame
+        if (rc > 0)
+        {
+            tx_drop_count++;
+            error_assert(ERR_CAN_TXFAIL);
+        }
         return;
     }
 
@@ -724,7 +760,8 @@ void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
 //                 in FIFO order by the timer pump.
 //   CONTINUOUS -> keep sending on every timer tick (single frame re-sent, or
 //                 list stepped FIFO and wrapped).
-// Returns 0 on success, -1 when there is nothing to send.
+// Returns 0 on success, -1 when there is nothing to send, -2 when a
+// single-shot enqueue was refused by the hardware (FIFO full / off-bus).
 int32_t can_tx_start(can_tx_trigger_t trigger)
 {
     if (can_send_mode == CAN_SEND_MODE_FRAMELIST)
@@ -755,7 +792,9 @@ int32_t can_tx_start(can_tx_trigger_t trigger)
         // Single shot of the most recent frame: no periodic job needed.
         tx_job_active = 0;
         __enable_irq();
-        return can_tx_hw(&cur_tx_hdr, cur_tx_data) ? 0 : -1;
+        // Without a peer the TX FIFO stays occupied (pending ACK) — further
+        // single-shots then fail here. That is CAN busy, not a bad USB frame.
+        return can_tx_hw(&cur_tx_hdr, cur_tx_data) ? 0 : -2;
     }
     else /* CONTINUOUS */
     {
@@ -942,6 +981,32 @@ static void st_put_u16(char *buf, uint16_t max, uint16_t *n, uint16_t v)
     st_put(buf, max, n, (char)('0' + (v % 10u)));
 }
 
+// append an unsigned decimal number (up to 5 digits, capped at 99999)
+static void st_put_u32(char *buf, uint16_t max, uint16_t *n, uint32_t v)
+{
+    char tmp[5];
+    uint8_t len = 0;
+    if (v > 99999u)
+        v = 99999u;
+    if (v == 0u)
+    {
+        st_put(buf, max, n, '0');
+        return;
+    }
+    while (v > 0u && len < 5u)
+    {
+        tmp[len++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    }
+    while (len > 0u)
+        st_put(buf, max, n, tmp[--len]);
+}
+
+uint32_t can_tx_drop_count(void)
+{
+    return tx_drop_count;
+}
+
 uint16_t can_format_status(char *buf, uint16_t max)
 {
     if (buf == NULL || max < 2)
@@ -962,6 +1027,7 @@ uint16_t can_format_status(char *buf, uint16_t max)
     static const char c1[] = " cur=1";
     static const char pend[] = " pend=";
     static const char act[] = " act=";
+    static const char drop[] = " drop=";
     static const char errt[] = " err=";
 
     uint16_t n = 0;
@@ -988,6 +1054,9 @@ uint16_t can_format_status(char *buf, uint16_t max)
 
     for (i = 0; act[i]; i++) st_put(buf, max, &n, act[i]);
     st_put_u16(buf, max, &n, (uint16_t)can_frame_list_active_count());
+
+    for (i = 0; drop[i]; i++) st_put(buf, max, &n, drop[i]);
+    st_put_u32(buf, max, &n, tx_drop_count);
 
     for (i = 0; errt[i]; i++) st_put(buf, max, &n, errt[i]);
     for (i = 0; i < 8 && n + 1u < max; i++)

@@ -7,6 +7,9 @@
  *                 main-loop / USB context)
  *   - active[]  : committed list, read by the TX pump ISR
  *
+ * When pending is full, the oldest entry is dropped and the new frame is
+ * appended (caller reports ERR_CAN_TXFAIL + drop count).
+ *
  * Concurrency:
  *   - pending writes happen in the main loop (USB parser); commit() copies
  *     pending -> active under __disable_irq() so a concurrent pump ISR never
@@ -39,7 +42,7 @@ void can_frame_list_init(void)
 
 
 // Append one frame to the pending burst.
-// Returns 0 on success, -1 if the list is full or the arguments are invalid.
+// Returns 0 on success, 1 if the oldest was dropped to make room, -1 invalid.
 int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,
                                    const uint8_t *data)
 {
@@ -50,12 +53,18 @@ int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,
     if (bytes < 0 || bytes > (int8_t)CAN_FRAME_LIST_MAX_DLC)
         return -1;
 
+    int32_t dropped = 0;
+
     __disable_irq();
 
     if (pending_count >= CAN_FRAME_LIST_MAX_FRAMES)
     {
-        __enable_irq();
-        return -1;   // burst longer than the host promise -> refuse
+        // Overwrite oldest: shift left one slot, keep count at MAX.
+        memmove(&pending_list[0], &pending_list[1],
+                (size_t)(CAN_FRAME_LIST_MAX_FRAMES - 1u) *
+                    sizeof(can_frame_list_frame_t));
+        pending_count = (uint16_t)(CAN_FRAME_LIST_MAX_FRAMES - 1u);
+        dropped = 1;
     }
 
     pending_list[pending_count].header = *header;
@@ -66,7 +75,7 @@ int32_t can_frame_list_pending_add(const FDCAN_TxHeaderType *header,
     pending_count++;
 
     __enable_irq();
-    return 0;
+    return dropped;
 }
 
 

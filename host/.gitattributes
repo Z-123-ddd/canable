@@ -1,0 +1,2 @@
+# dist 下的安装程序是二进制，禁止按文本处理
+dist/*.exe binary

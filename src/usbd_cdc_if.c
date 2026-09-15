@@ -138,20 +138,36 @@ void cdc_process(void)
 }
 
 
-// CDC transmit: queue data for sending via USB
+// CDC transmit: queue data for sending via USB.
+// All-or-nothing: if the whole frame does not fit, write nothing. A partial
+// AA AD / AA AB on the wire desynchronizes the host byte-stream parser
+// (e.g. stuck in LOG_TEXT until overflow), which shows as "LED on, no log".
 void cdc_transmit(uint8_t *buf, uint16_t len)
 {
+    if (buf == NULL || len == 0)
+        return;
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    uint32_t used = (txbuf.head >= txbuf.tail)
+                        ? (txbuf.head - txbuf.tail)
+                        : (USBTXQUEUE_LEN - txbuf.tail + txbuf.head);
+    uint32_t free = USBTXQUEUE_LEN - 1u - used;   // one slot left empty
+    if (free < len)
+    {
+        __set_PRIMASK(primask);
+        error_assert(ERR_FULLBUF_USBTX);
+        return;
+    }
+
     for (uint16_t i = 0; i < len; i++)
     {
-        uint32_t next_head = (txbuf.head + 1) % USBTXQUEUE_LEN;
-        if (next_head == txbuf.tail)
-        {
-            error_assert(ERR_FULLBUF_USBTX);
-            break;
-        }
         txbuf.data[txbuf.head] = buf[i];
-        txbuf.head = next_head;
+        txbuf.head = (txbuf.head + 1) % USBTXQUEUE_LEN;
     }
+
+    __set_PRIMASK(primask);
 }
 
 

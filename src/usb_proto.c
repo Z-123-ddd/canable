@@ -31,8 +31,8 @@ typedef enum {
     PROTO_IDLE,         // waiting for the first header byte (0xAA)
     PROTO_SOF1,         // got 0xAA, waiting for the 2nd header byte
     PROTO_CMD,          // collecting a command payload
-    PROTO_DATA_ID,      // collecting the CAN ID bytes
-    PROTO_DATA_CTRL,    // waiting for the control byte
+    PROTO_DATA_CTRL,    // got AA AB, waiting for CTRL
+    PROTO_DATA_ID,      // collecting ID bytes (length from CTRL.IDE)
     PROTO_DATA_BODY,    // collecting data bytes
     PROTO_DATA_CRC,     // collecting CRC bytes
 } proto_state_t;
@@ -40,10 +40,10 @@ typedef enum {
 
 // Module state
 static proto_state_t state = PROTO_IDLE;
-static uint8_t rxbuf[USB_PROTO_MAX_PAYLOAD];   // payload collected so far
+static uint8_t rxbuf[USB_PROTO_MAX_PAYLOAD];   // payload: CTRL|ID|DATA|CRC
 static uint16_t rxlen;                          // bytes stored in rxbuf
-static uint16_t need;                           // payload bytes still expected
-static uint8_t id_bytes;                        // 2 or 4 (current ID config)
+static uint16_t need;                           // bytes still expected in current phase
+static uint8_t id_bytes;                        // 2 or 4 from CTRL.IDE
 static uint8_t ctrl_byte;                       // data-frame control byte
 static uint8_t data_bytes;                      // CAN payload length
 static uint8_t crc_bytes;                       // 2 (classic) or 3 (FD)
@@ -76,12 +76,11 @@ static uint32_t crc_msb_width(const uint8_t *p, uint16_t len, uint8_t width, uin
 }
 
 
-// CRC over the wire bytes [ID | control | data], contiguous in rxbuf
-static uint32_t crc_compute(uint16_t id_n, uint8_t ctrl)
+// CRC over wire bytes [CTRL | ID | data], contiguous in rxbuf[0..)
+static uint32_t crc_compute(uint8_t ctrl)
 {
-    uint16_t n = (uint16_t)(id_n + 1 + data_bytes);
+    uint16_t n = (uint16_t)(1u + id_bytes + data_bytes);
 
-    // Select the CRC width by frame type / payload length (CAN FD rules)
     if (ctrl & USB_PROTO_CTRL_FDF)
         return (data_bytes <= 16U)
                    ? crc_msb_width(rxbuf, n, 17, USB_PROTO_CRC17_POLY)
@@ -90,10 +89,8 @@ static uint32_t crc_compute(uint16_t id_n, uint8_t ctrl)
 }
 
 
-// Encode a received CAN/FD frame (bus -> USB) into the same binary layout the
-// host uses to send data: AA AB | ID | CTRL | DATA | CRC. The ID field width
-// follows the ACTUAL received frame type (standard 2B / extended 4B) so the
-// report is independent of the host's send-side id-format config.
+// Encode a received CAN/FD frame (bus -> USB):
+// AA AB | CTRL | ID(2/4) | DATA | CRC. IDE in CTRL selects ID width.
 int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
                             const FDCAN_RxHeaderType *hdr, const uint8_t *data)
 {
@@ -103,33 +100,33 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
     uint8_t fd     = (hdr->FDFormat == FDCAN_FD_CAN) ? 1u : 0u;
     uint8_t ext    = (hdr->IdType == FDCAN_EXTENDED_ID) ? 1u : 0u;
     uint8_t remote = (!fd && hdr->RxFrameType == FDCAN_REMOTE_FRAME) ? 1u : 0u;
-    uint8_t id_bytes = ext ? 4u : 2u;
+    uint8_t idb = ext ? 4u : 2u;
 
     int8_t nbytes = hal_dlc_code_to_bytes(hdr->DataLength);
     if (nbytes < 0)
         return -1;
     if (remote)
-        nbytes = 0;   // classic remote frames carry no data bytes
+        nbytes = 0;
 
-    // Raw DLC nibble (0..15): the HAL DLC code keeps it in the high nibble.
     uint8_t dlc = (uint8_t)((hdr->DataLength >> 16) & USB_PROTO_CTRL_DLC_M);
 
     uint8_t ctrl = 0;
     if (fd)                                             ctrl |= USB_PROTO_CTRL_FDF;
     if (fd && hdr->BitRateSwitch == FDCAN_BRS_ON)       ctrl |= USB_PROTO_CTRL_BRS;
     if (remote)                                         ctrl |= USB_PROTO_CTRL_RTR;
+    if (ext)                                            ctrl |= USB_PROTO_CTRL_IDE;
     ctrl |= dlc;
 
-    uint8_t crc_bytes = fd ? 3u : 2u;
-    uint16_t total = (uint16_t)(2u + id_bytes + 1u + (uint16_t)nbytes + crc_bytes);
+    uint8_t crcb = fd ? 3u : 2u;
+    uint16_t total = (uint16_t)(2u + 1u + idb + (uint16_t)nbytes + crcb);
     if (total > max)
         return -1;
 
     uint16_t i = 0;
-    out[i++] = USB_PROTO_SOF1;       // 0xAA
-    out[i++] = USB_PROTO_DATA_SOF2;  // 0xAB
+    out[i++] = USB_PROTO_SOF1;
+    out[i++] = USB_PROTO_DATA_SOF2;
+    out[i++] = ctrl;
 
-    // ID, big-endian
     if (ext) {
         out[i++] = (uint8_t)(hdr->ID >> 24);
         out[i++] = (uint8_t)(hdr->ID >> 16);
@@ -137,13 +134,10 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
     out[i++] = (uint8_t)(hdr->ID >> 8);
     out[i++] = (uint8_t)(hdr->ID);
 
-    out[i++] = ctrl;
-
     for (int8_t j = 0; j < nbytes; j++)
         out[i++] = data[j];
 
-    // Transport CRC over ID + CTRL + DATA (skip the 2-byte header)
-    uint16_t cov = (uint16_t)(id_bytes + 1u + (uint16_t)nbytes);
+    uint16_t cov = (uint16_t)(1u + idb + (uint16_t)nbytes);
     uint32_t crc;
     if (fd)
         crc = (nbytes <= 16)
@@ -224,7 +218,8 @@ static void proto_cmd_dispatch(void)
             can_tx_trigger_t trig = (value & 1u)
                                         ? CAN_TX_TRIGGER_CONTINUOUS
                                         : CAN_TX_TRIGGER_SINGLE;
-            if (can_tx_start(trig) == 0)
+            int32_t rc = can_tx_start(trig);
+            if (rc == 0)
             {
                 // Continuous mode, and any list-mode job (even a single
                 // pass), is driven by the periodic timer pump -> enable it.
@@ -234,9 +229,17 @@ static void proto_cmd_dispatch(void)
                     can_timer_enable();
                 }
             }
+            else if (rc == -1)
+            {
+                // Nothing cached: not a malformed USB frame (host may race
+                // TX_START before data, or data was dropped). Do not assert
+                // ERR_USB_BADFRAME — that was misread as the "first" fault
+                // when testing without a peer.
+            }
             else
             {
-                error_assert(ERR_USB_BADFRAME);   // nothing cached to send
+                // Single-shot HW refuse (FIFO full / no ACK yet).
+                error_assert(ERR_CAN_TXFAIL);
             }
             break;
         }
@@ -248,7 +251,7 @@ static void proto_cmd_dispatch(void)
 
         case USB_PROTO_CMD_ID_GET_STATUS:
         {
-            char st[64];
+            char st[96];
             uint16_t n = can_format_status(st, (uint16_t)sizeof(st));
             if (n > 0)
                 cdc_transmit((uint8_t *)st, n);
@@ -274,15 +277,14 @@ static void proto_cmd_dispatch(void)
 }
 
 
-// Handle a complete data frame: rxbuf = [ID..][ctrl][data..][crc..]
+// Handle a complete data frame: rxbuf = [CTRL | ID.. | data.. | crc..]
 static void proto_data_dispatch(void)
 {
-    const uint8_t *idp = &rxbuf[0];
-    const uint8_t *datap = &rxbuf[id_bytes + 1];
+    const uint8_t *idp = &rxbuf[1];
+    const uint8_t *datap = &rxbuf[1u + id_bytes];
     const uint8_t *crcp = datap + data_bytes;
 
-    // 1. Verify CRC (covers ID + control + data)
-    uint32_t expect = crc_compute(id_bytes, ctrl_byte);
+    uint32_t expect = crc_compute(ctrl_byte);
     uint32_t got = 0;
     for (uint8_t i = 0; i < crc_bytes; i++)
         got = (got << 8) | crcp[i];
@@ -292,14 +294,13 @@ static void proto_data_dispatch(void)
         return;
     }
 
-    // 2. Build the FDCAN TX header
     FDCAN_TxHeaderType hdr;
     memset(&hdr, 0, sizeof(hdr));
     hdr.TxFrameType = ((ctrl_byte & USB_PROTO_CTRL_RTR) && !(ctrl_byte & USB_PROTO_CTRL_FDF))
                           ? FDCAN_REMOTE_FRAME
                           : FDCAN_DATA_FRAME;
     hdr.FDFormat = (ctrl_byte & USB_PROTO_CTRL_FDF) ? FDCAN_FD_CAN : FDCAN_CLASSIC_CAN;
-    hdr.IdType = (id_bytes == 4) ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID;
+    hdr.IdType = (ctrl_byte & USB_PROTO_CTRL_IDE) ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID;
     hdr.BitRateSwitch = (ctrl_byte & USB_PROTO_CTRL_BRS) ? FDCAN_BRS_ON : FDCAN_BRS_OFF;
     hdr.ErrorState = FDCAN_ESI_ACTIVE;
     hdr.TxEventFifo = FDCAN_NO_TX_EVENTS;
@@ -312,9 +313,6 @@ static void proto_data_dispatch(void)
         hdr.ID = ((uint32_t)idp[0] << 8) | (uint32_t)idp[1];
 
     hdr.DataLength = can_dlc_code_to_hal_dlc(ctrl_byte & USB_PROTO_CTRL_DLC_M);
-
-    // 3. Hand the frame to the TX engine (caches it in RAM; transmission is
-    //    triggered by a later TX command via can_tx_start).
     can_tx_data(&hdr, datap);
 }
 
@@ -341,15 +339,11 @@ void usb_proto_feed(uint8_t byte)
             }
             else if (byte == USB_PROTO_DATA_SOF2)
             {
-                state = PROTO_DATA_ID;
+                state = PROTO_DATA_CTRL;
                 rxlen = 0;
-                id_bytes = (can_get_id_format() == CAN_ID_FORMAT_EXTENDED) ? 4U : 2U;
-                need = id_bytes;
             }
             else
             {
-                // Bad header: drop it. If this byte could start a new frame
-                // (0xAA) keep waiting for its 2nd byte, else go idle.
                 state = (byte == USB_PROTO_SOF1) ? PROTO_SOF1 : PROTO_IDLE;
             }
             break;
@@ -363,51 +357,43 @@ void usb_proto_feed(uint8_t byte)
             }
             break;
 
+        case PROTO_DATA_CTRL:
+        {
+            ctrl_byte = byte;
+            rxbuf[0] = byte;
+            rxlen = 1;
+
+            uint8_t dlc = ctrl_byte & USB_PROTO_CTRL_DLC_M;
+            int8_t dl = hal_dlc_code_to_bytes(can_dlc_code_to_hal_dlc(dlc));
+            if (dl < 0 || dl > (int8_t)USB_PROTO_MAX_DATA)
+            {
+                error_assert(ERR_USB_BADFRAME);
+                state = PROTO_IDLE;
+                break;
+            }
+            if (!(ctrl_byte & USB_PROTO_CTRL_FDF) && dlc > 8u)
+            {
+                error_assert(ERR_USB_BADFRAME);
+                state = PROTO_IDLE;
+                break;
+            }
+
+            id_bytes = (ctrl_byte & USB_PROTO_CTRL_IDE) ? 4u : 2u;
+            crc_bytes = (ctrl_byte & USB_PROTO_CTRL_FDF) ? 3u : 2u;
+            if ((ctrl_byte & USB_PROTO_CTRL_RTR) && !(ctrl_byte & USB_PROTO_CTRL_FDF))
+                data_bytes = 0;
+            else
+                data_bytes = (uint8_t)dl;
+
+            state = PROTO_DATA_ID;
+            need = id_bytes;
+            break;
+        }
+
         case PROTO_DATA_ID:
             rxbuf[rxlen++] = byte;
-            if (rxlen >= id_bytes)
+            if (--need == 0)
             {
-                state = PROTO_DATA_CTRL;
-                need = 1;
-            }
-            break;
-
-        case PROTO_DATA_CTRL:
-            ctrl_byte = byte;
-            rxbuf[rxlen++] = byte;
-
-            // Sanity check the DLC before committing to a length
-            {
-                uint8_t dlc = ctrl_byte & USB_PROTO_CTRL_DLC_M;
-                int8_t dl = hal_dlc_code_to_bytes(can_dlc_code_to_hal_dlc(dlc));
-                if (dl < 0 || dl > (int8_t)USB_PROTO_MAX_DATA)
-                {
-                    error_assert(ERR_USB_BADFRAME);
-                    state = PROTO_IDLE;
-                    break;
-                }
-
-                if (ctrl_byte & USB_PROTO_CTRL_FDF)
-                {
-                    crc_bytes = 3;
-                }
-                else
-                {
-                    if (dlc > 8U)
-                    {
-                        error_assert(ERR_USB_BADFRAME);  // classic with FD DLC
-                        state = PROTO_IDLE;
-                        break;
-                    }
-                    crc_bytes = 2;
-                }
-
-                // Remote frames carry no data bytes
-                if ((ctrl_byte & USB_PROTO_CTRL_RTR) && !(ctrl_byte & USB_PROTO_CTRL_FDF))
-                    data_bytes = 0;
-                else
-                    data_bytes = (uint8_t)dl;
-
                 if (data_bytes > 0)
                 {
                     state = PROTO_DATA_BODY;

@@ -157,8 +157,10 @@ void can_rx_isr(void);        // FDCAN1_INT0 ISR: drain HW FIFO into software RX
 void can_send_timer_tick(void);  // periodic timer ISR (see can.c state machine)
 // Report a CAN bus fault to the host (reads FDCAN protocol status; called from
 // the Bus-Off ISR). Asserts ERR_CAN_ACK when the last error was a missing ACK
-// (e.g. no other node on the bus), otherwise ERR_CAN_BUSOFF.
+// (e.g. no other node on the bus), otherwise ERR_CAN_BUSOFF (severe fault).
 void can_report_bus_error(void);
+// Called from the protocol-error ISR: assert ERR_CAN_ACK when LEC/DLEC is ACK.
+void can_report_ack_error(void);
 uint8_t is_can_msg_pending(uint8_t fifo);
 
 // ---- Host data / TX job control (single vs continuous send) ----
@@ -170,10 +172,15 @@ void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data);
 // Start a send job on the cached frame.
 //   SINGLE     -> send it once and stop.
 //   CONTINUOUS -> keep re-sending it on every timer tick.
-// Returns 0 on success, -1 when there is no cached frame to send.
+// Returns:
+//   0  success
+//  -1  nothing cached / empty list (host protocol error)
+//  -2  hardware refused the single-shot enqueue (FIFO full / bus not ready)
 int32_t can_tx_start(can_tx_trigger_t trigger);
 // Abort any running TX job (stops the periodic pump).
 void can_tx_stop(void);
+// Frames dropped because the TX pending list was full (oldest overwritten).
+uint32_t can_tx_drop_count(void);
 // Format a one-line ASCII status report (host GET_STATUS command).
 // Writes at most max-1 bytes + NUL; returns the length.
 uint16_t can_format_status(char *buf, uint16_t max);

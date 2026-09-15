@@ -20,9 +20,9 @@ typedef enum _error_t
     ERR_FULLBUF_USBTX,
     ERR_USB_BADFRAME,     // malformed binary USB frame / unsupported command
     ERR_USB_CRC,          // binary USB frame CRC mismatch
-    ERR_FRAMELIST_FULL,   // list-mode burst longer than CAN_FRAME_LIST_MAX_FRAMES
+    ERR_FRAMELIST_FULL,   // legacy: list overflow now uses ERR_CAN_TXFAIL + drop
     ERR_CAN_ACK,          // CAN TX: no ACK (no other node on the bus)
-    ERR_CAN_BUSOFF,       // CAN controller entered bus-off (protocol error)
+    ERR_CAN_BUSOFF,       // severe protocol error caused Bus-Off (non-ACK)
 
     ERR_MAX
 } error_t;
@@ -33,8 +33,9 @@ void error_assert(error_t err);
 uint32_t error_last_timestamp(void);
 uint32_t error_reg(void);
 
-// Pop one pending error report queued by error_assert() (for the main loop to
-// send an AA AD warning frame). Returns -1 when there is none.
+// Pop one pending error type marked by error_assert() (for the main loop to
+// send an AA AD warning frame). Same type coalesces while pending. Returns -1
+// when there is none.
 int error_take_pending(void);
 
 #endif /* INC_ERROR_H_ */
