@@ -3236,10 +3236,8 @@ void MainWindow::onResponseReceived(const proto::RxResponse &r)
         }
     } else if (r.id == proto::RSP_ERR_CNT) {
         if (m_errCntLbl) {
-            // 硬件计数按错误规则累加（ACK 失败 TEC 常 +8）；界面按帧数显示：÷8
-            const int tecFrames = (int)r.tec / 8;
-            const int recFrames = (int)r.rec / 8;
-            QString t = QStringLiteral("TEC:%1  REC:%2").arg(tecFrames).arg(recFrames);
+            // 固件已按硬件 TEC/REC 增量÷8 累计为错误帧数（uint32），界面直接显示
+            QString t = QStringLiteral("TEC:%1  REC:%2").arg(r.tec).arg(r.rec);
             if (!r.crcOk)
                 t += QStringLiteral(" (CRC?)");
             m_errCntLbl->setText(t);

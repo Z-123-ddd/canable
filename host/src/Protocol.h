@@ -9,7 +9,7 @@
 //    响应帧  AA AC | RSPID(1) | PAYLOAD
 //            id1 波特率锁定：hz[4] LE
 //            id2 版本：LEN(1)+TEXT
-//            id3 错误计数：TEC(1)|REC(1)|CRC8(TEC+REC)  （MCU 主动上报）
+//            id3 错误帧累计：TEC_u32 LE | REC_u32 LE | CRC8(8B)  （MCU 主动上报）
 //    状态行  ASCII "ST:..."（GET_STATUS 回包）
 //
 //  CRC：经典 CRC-15 / FD<=16 CRC-17 / FD>16 CRC-21，MSB-first, init 0,
@@ -64,7 +64,7 @@ constexpr uint32_t INTERVAL_MAX_MS = 1000;
 // 响应 id
 constexpr uint8_t RSP_BITRATE_LOCK = 1;
 constexpr uint8_t RSP_VERSION      = 2;   // 版本：AA AC 02 | LEN(1) | TEXT(ASCII)
-constexpr uint8_t RSP_ERR_CNT      = 3;   // 错误计数：AA AC 03 | TEC | REC | CRC8
+constexpr uint8_t RSP_ERR_CNT      = 3;   // 错误帧累计：AA AC 03 | TEC_u32 LE | REC_u32 LE | CRC8
 
 // ---- DLC <-> 字节数 ----
 int  dlcToBytes(int dlc);     // 0..15 -> 0..64  (无效返回 -1)
@@ -94,8 +94,8 @@ struct RxResponse {              // AA AC
     uint8_t id = 0;
     uint32_t value = 0;
     QString text;                // RSP_VERSION 的 ASCII 负载（其余为空）
-    uint8_t tec = 0;             // RSP_ERR_CNT
-    uint8_t rec = 0;
+    uint32_t tec = 0;            // RSP_ERR_CNT：累计发送错误帧数（固件已按 TEC÷8 累计）
+    uint32_t rec = 0;            // RSP_ERR_CNT：累计接收错误帧数
     bool crcOk = true;           // RSP_ERR_CNT 的 CRC8；其它 id 为 true
 };
 

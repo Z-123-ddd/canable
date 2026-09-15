@@ -4,13 +4,13 @@
 
 | 构件 | 版本 | 说明 |
 |------|------|------|
-| 固件 | **v30.0.1** | `Makefile` → `FW_VERSION`；Keil 见 `inc/git_version.h` |
-| 上位机 | **30.0.1** | `host/CMakeLists.txt` / `host/package.sh` |
+| 固件 | **v30.0.2** | `Makefile` → `FW_VERSION`；Keil 见 `inc/git_version.h` |
+| 上位机 | **30.0.2** | `host/CMakeLists.txt` / `host/package.sh` |
 
 发行物（本仓库）：
 
-- 固件：`release/canable2-n32-v30.0.1.bin`（及 `.hex`）
-- 上位机：`host/dist/CyberBeast-CANable2-Setup-30.0.1.exe`、`host/dist/CyberBeast-CANable2-30.0.1-portable.zip`
+- 固件：`release/canable2-n32-v30.0.2.bin`（及 `.hex`）
+- 上位机：`host/dist/CyberBeast-CANable2-Setup-30.0.2.exe`、`host/dist/CyberBeast-CANable2-30.0.2-portable.zip`
 
 ---
 
@@ -85,7 +85,7 @@ AA AB | CTRL (1B) | ID (2B 或 4B, 大端) | DATA (0..64B) | CRC (2B 或 3B)
 |----|------|
 | `AA AC 01 \| bitrate LE` | 自动波特率锁定 |
 | `AA AC 02 \| LEN \| TEXT` | 固件版本 |
-| `AA AC 03 \| TEC \| REC \| CRC8` | 错误计数（非零时主动上报；上位机状态栏按帧显示 TEC÷8 / REC） |
+| `AA AC 03 \| TEC_u32 \| REC_u32 \| CRC8` | 累计错误帧数（固件对硬件 TEC/REC 增量÷8 后饱和累加至 uint32；上位机直接显示） |
 | `AA AD \| ERR_* \| DA AA \| CRC8` | 错误名（如 `ERR_CAN_TXFAIL`、`ERR_USB_CRC`） |
 
 单帧发送默认硬件不重试（DAR）；连续无 ACK 会累计 TEC（常见 +8），并可能上报 `ERR_CAN_TXFAIL`。

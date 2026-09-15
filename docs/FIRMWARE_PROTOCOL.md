@@ -332,15 +332,15 @@ AA AC | 01 | BITRATE (4B 小端)
 
 示例（锁定 500k）：`AA AC 01 20 A1 07 00`
 
-### 14.3 错误计数上报（AA AC 03）
+### 14.3 错误帧累计上报（AA AC 03）
 
-当 TEC 或 REC 非零时，主循环主动上报：
+固件将硬件 TEC/REC 的**增量 ÷8** 累计为错误帧数（`uint32`，饱和到 `0xFFFFFFFF`），主动上报：
 
 ```
-AA AC | 03 | TEC (1B) | REC (1B) | CRC8(TEC+REC)
+AA AC | 03 | TEC_FRAMES (4B 小端) | REC_FRAMES (4B 小端) | CRC8(覆盖 8 字节计数)
 ```
 
-CRC-8：poly `0x07`、init 0，仅覆盖 TEC+REC。上位机状态栏通常按帧显示 TEC÷8（经典 CAN 一帧无 ACK 常见 TEC+8）。
+CRC-8：poly `0x07`、init 0。上位机状态栏直接显示原始累计值（不再 ÷8）。硬件 TEC 复位后累计值仍保持（上电清零）。
 
 ### 14.4 固件版本（AA AC 02）
 

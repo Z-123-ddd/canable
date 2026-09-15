@@ -4,8 +4,16 @@
 
 | 构件 | 版本 | 来源 |
 |---|---|---|
-| 固件 | **v30.0.1** | `Makefile` `FW_VERSION`；Keil 见 `inc/git_version.h` |
-| 上位机 | **30.0.1** | `host/CMakeLists.txt` / `host/package.sh` / NSIS |
+| 固件 | **v30.0.2** | `Makefile` `FW_VERSION`；Keil 见 `inc/git_version.h` |
+| 上位机 | **30.0.2** | `host/CMakeLists.txt` / `host/package.sh` / NSIS |
+
+---
+
+## v30.0.2（固件 + 上位机）
+
+### 协议
+- `AA AC 03` 改为累计错误帧数：`TEC_u32 LE | REC_u32 LE | CRC8`（固件对硬件 TEC/REC 增量÷8 后饱和累加至 `uint32`）。
+- 上位机状态栏直接显示原始累计值，不再 ÷8。
 
 ---
 

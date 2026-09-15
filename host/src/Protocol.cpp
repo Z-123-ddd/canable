@@ -234,7 +234,7 @@ void Parser::feed(const QByteArray &bytes)
             m_rspId = by;
             if (by == RSP_BITRATE_LOCK) { m_buf.clear(); m_state = RSP_PAYLOAD; m_need = 4; }
             else if (by == RSP_VERSION) { m_buf.clear(); m_text.clear(); m_state = RSP_VER_LEN; m_need = 1; }
-            else if (by == RSP_ERR_CNT) { m_buf.clear(); m_state = RSP_PAYLOAD; m_need = 3; } // TEC REC CRC
+            else if (by == RSP_ERR_CNT) { m_buf.clear(); m_state = RSP_PAYLOAD; m_need = 9; } // TEC4 REC4 CRC
             else { finishResponse(); m_state = IDLE; }
             break;
 
@@ -300,14 +300,21 @@ void Parser::finishResponse()
     m.type = Message::Response;
     m.response.id = m_rspId;
     m.response.crcOk = true;
-    if (m_rspId == RSP_ERR_CNT && m_buf.size() >= 3) {
-        m.response.tec = (uint8_t)m_buf[0];
-        m.response.rec = (uint8_t)m_buf[1];
-        const uint8_t got = (uint8_t)m_buf[2];
-        uint8_t cov[2] = { m.response.tec, m.response.rec };
-        m.response.crcOk = (crc8(cov, 2) == got);
-        m.response.value = (uint32_t)m.response.tec
-                         | ((uint32_t)m.response.rec << 8);
+    if (m_rspId == RSP_ERR_CNT && m_buf.size() >= 9) {
+        auto u32le = [](const QByteArray &b, int off) -> uint32_t {
+            return (uint32_t)(uint8_t)b[off]
+                 | ((uint32_t)(uint8_t)b[off + 1] << 8)
+                 | ((uint32_t)(uint8_t)b[off + 2] << 16)
+                 | ((uint32_t)(uint8_t)b[off + 3] << 24);
+        };
+        m.response.tec = u32le(m_buf, 0);
+        m.response.rec = u32le(m_buf, 4);
+        const uint8_t got = (uint8_t)m_buf[8];
+        uint8_t cov[8];
+        for (int i = 0; i < 8; i++)
+            cov[i] = (uint8_t)m_buf[i];
+        m.response.crcOk = (crc8(cov, 8) == got);
+        m.response.value = m.response.tec;
         m.crcOk = m.response.crcOk;
     } else {
         uint32_t v = 0;
@@ -571,27 +578,31 @@ bool selfTest(QString *report)
               "AA AC 版本响应解析 (id=2)");
     }
 
-    // 14. AA AC 错误计数（id=3）：AA AC 03 | TEC | REC | CRC8(TEC+REC)
+    // 14. AA AC 错误帧累计（id=3）：AA AC 03 | TEC_u32 LE | REC_u32 LE | CRC8
     {
-        uint8_t tec = 12, rec = 34;
-        uint8_t cov[2] = { tec, rec };
+        uint32_t tec = 0x00000100u, rec = 0x00000022u;
+        uint8_t cov[8] = {
+            (uint8_t)(tec), (uint8_t)(tec >> 8), (uint8_t)(tec >> 16), (uint8_t)(tec >> 24),
+            (uint8_t)(rec), (uint8_t)(rec >> 8), (uint8_t)(rec >> 16), (uint8_t)(rec >> 24),
+        };
         QByteArray e;
         e.append(char(0xAA)); e.append(char(0xAC)); e.append(char(RSP_ERR_CNT));
-        e.append(char(tec)); e.append(char(rec)); e.append(char(crc8(cov, 2)));
+        for (int i = 0; i < 8; i++) e.append(char(cov[i]));
+        e.append(char(crc8(cov, 8)));
         Parser ps; ps.feed(e);
         auto msgs = ps.takeMessages();
         check(msgs.size() == 1 && msgs[0].type == Message::Response &&
               msgs[0].response.id == RSP_ERR_CNT &&
               msgs[0].response.tec == tec && msgs[0].response.rec == rec &&
               msgs[0].response.crcOk,
-              "AA AC 错误计数 TEC/REC 解析 (id=3)");
+              "AA AC 错误帧累计 TEC/REC 解析 (id=3)");
         // CRC 错误仍解析，但 crcOk=false
-        e[5] = char((uint8_t)e[5] ^ 0xFF);
+        e[11] = char((uint8_t)e[11] ^ 0xFF);
         Parser ps2; ps2.feed(e);
         auto bad = ps2.takeMessages();
         check(bad.size() == 1 && bad[0].response.id == RSP_ERR_CNT &&
               !bad[0].response.crcOk,
-              "AA AC 错误计数 CRC 错误标记");
+              "AA AC 错误帧累计 CRC 错误标记");
     }
 
     if (report) *report = log;

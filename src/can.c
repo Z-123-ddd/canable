@@ -989,16 +989,35 @@ void can_send_timer_tick(void)
 }
 
 
-// ---- Unsolicited TEC/REC reporting (AA AC id=3) ----
+// ---- Unsolicited TEC/REC error-frame accumulation (AA AC id=3) ----
+// Hardware TEC/REC are 0..255 and typically rise by 8 per failed frame (ACK).
+// Convert increases into frame counts (delta/8 with residual) and accumulate
+// into saturating uint32 totals for the host (no host-side ÷8).
 #define CAN_ERR_CNT_REPORT_MS  200u
 
-uint8_t can_err_cnt_poll(uint8_t *tec, uint8_t *rec)
+static void can_err_cnt_add_sat(uint32_t *acc, uint32_t add)
 {
-    static uint8_t last_tec = 0;
-    static uint8_t last_rec = 0;
+    if (add == 0u || acc == NULL)
+        return;
+    if (*acc > (0xFFFFFFFFu - add))
+        *acc = 0xFFFFFFFFu;
+    else
+        *acc += add;
+}
+
+uint8_t can_err_cnt_poll(uint32_t *tec_frames, uint32_t *rec_frames)
+{
+    static uint32_t soft_tec = 0;
+    static uint32_t soft_rec = 0;
+    static uint8_t last_hw_tec = 0;
+    static uint8_t last_hw_rec = 0;
+    static uint8_t tec_resid = 0;
+    static uint8_t rec_resid = 0;
+    static uint32_t last_report_tec = 0;
+    static uint32_t last_report_rec = 0;
     static uint32_t last_ms = 0;
 
-    if (tec == NULL || rec == NULL)
+    if (tec_frames == NULL || rec_frames == NULL)
         return 0;
     if (bus_state != ON_BUS)
         return 0;
@@ -1008,24 +1027,37 @@ uint8_t can_err_cnt_poll(uint8_t *tec, uint8_t *rec)
     uint8_t t = (uint8_t)(ec.TxErrorCnt & 0xFFu);
     uint8_t r = (uint8_t)(ec.RxErrorCnt & 0xFFu);
 
-    if (t == 0u && r == 0u)
+    if (t > last_hw_tec)
     {
-        last_tec = 0;
-        last_rec = 0;
-        return 0;
+        uint16_t d = (uint16_t)(t - last_hw_tec);
+        uint16_t sum = (uint16_t)tec_resid + d;
+        can_err_cnt_add_sat(&soft_tec, (uint32_t)(sum / 8u));
+        tec_resid = (uint8_t)(sum % 8u);
     }
+    if (r > last_hw_rec)
+    {
+        uint16_t d = (uint16_t)(r - last_hw_rec);
+        uint16_t sum = (uint16_t)rec_resid + d;
+        can_err_cnt_add_sat(&soft_rec, (uint32_t)(sum / 8u));
+        rec_resid = (uint8_t)(sum % 8u);
+    }
+    last_hw_tec = t;
+    last_hw_rec = r;
+
+    if (soft_tec == 0u && soft_rec == 0u)
+        return 0;
 
     uint32_t now = system_get_ticks();
-    uint8_t changed = (t != last_tec) || (r != last_rec);
+    uint8_t changed = (soft_tec != last_report_tec) || (soft_rec != last_report_rec);
     uint8_t due = (uint32_t)(now - last_ms) >= CAN_ERR_CNT_REPORT_MS;
     if (!changed && !due)
         return 0;
 
-    last_tec = t;
-    last_rec = r;
+    last_report_tec = soft_tec;
+    last_report_rec = soft_rec;
     last_ms = now;
-    *tec = t;
-    *rec = r;
+    *tec_frames = soft_tec;
+    *rec_frames = soft_rec;
     return 1;
 }
 

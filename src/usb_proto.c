@@ -486,17 +486,27 @@ static uint8_t crc8_byte(const uint8_t *p, uint16_t len)
 }
 
 
-// Emit CAN error counters (MCU -> host): AA AC 03 | TEC | REC | CRC8(TEC+REC).
-void usb_proto_send_err_cnt(uint8_t tec, uint8_t rec)
+// Emit cumulative error-frame counts (MCU -> host):
+//   AA AC 03 | TEC_u32 LE | REC_u32 LE | CRC8(over 8 counter bytes).
+void usb_proto_send_err_cnt(uint32_t tec_frames, uint32_t rec_frames)
 {
-    uint8_t cov[2] = { tec, rec };
-    uint8_t b[6];
+    uint8_t cov[8];
+    cov[0] = (uint8_t)(tec_frames);
+    cov[1] = (uint8_t)(tec_frames >> 8);
+    cov[2] = (uint8_t)(tec_frames >> 16);
+    cov[3] = (uint8_t)(tec_frames >> 24);
+    cov[4] = (uint8_t)(rec_frames);
+    cov[5] = (uint8_t)(rec_frames >> 8);
+    cov[6] = (uint8_t)(rec_frames >> 16);
+    cov[7] = (uint8_t)(rec_frames >> 24);
+
+    uint8_t b[12];
     b[0] = USB_PROTO_SOF1;
     b[1] = USB_PROTO_RSP_SOF2;
     b[2] = USB_PROTO_RSP_ID_ERR_CNT;
-    b[3] = tec;
-    b[4] = rec;
-    b[5] = crc8_byte(cov, 2);
+    for (uint8_t i = 0; i < 8u; i++)
+        b[3 + i] = cov[i];
+    b[11] = crc8_byte(cov, 8);
     cdc_transmit(b, (uint16_t)sizeof(b));
 }
 

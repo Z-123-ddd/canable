@@ -187,9 +187,10 @@ uint32_t can_tx_drop_count(void);
 // Writes at most max-1 bytes + NUL; returns the length.
 uint16_t can_format_status(char *buf, uint16_t max);
 
-// Poll FDCAN TEC/REC for unsolicited host reporting.
-// Returns 1 and writes *tec/*rec when a report should be sent (either counter
-// non-zero and value changed, or still non-zero after ~200 ms). Returns 0 otherwise.
-uint8_t can_err_cnt_poll(uint8_t *tec, uint8_t *rec);
+// Poll FDCAN TEC/REC and accumulate error-frame counts (hw delta / 8) into
+// saturating uint32 totals. Returns 1 and writes *tec_frames/*rec_frames when
+// a report should be sent (either total non-zero and changed, or still non-zero
+// after ~200 ms). Returns 0 otherwise.
+uint8_t can_err_cnt_poll(uint32_t *tec_frames, uint32_t *rec_frames);
 
 #endif // _CAN_H

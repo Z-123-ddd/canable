@@ -93,9 +93,9 @@ int main(void)
         if (lock_hz >= 0)
             usb_proto_send_bitrate_lock((uint32_t)lock_hz);
 
-        // Unsolicited TEC/REC (AA AC id=3) when either counter is non-zero
+        // Unsolicited cumulative error-frame counts (AA AC id=3)
         {
-            uint8_t tec = 0, rec = 0;
+            uint32_t tec = 0, rec = 0;
             if (can_err_cnt_poll(&tec, &rec))
                 usb_proto_send_err_cnt(tec, rec);
         }

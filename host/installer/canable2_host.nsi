@@ -2,7 +2,7 @@
 ;  CANable2-N32 上位机 安装程序脚本 (NSIS 3.x, Unicode)
 ;  用法（由 host/package.sh 调用）：
 ;    makensis /DDEPLOYDIR=..\build\deploy /DOUTFILE=..\dist\xxx.exe \
-;             /DAPPVER=30.0.1 installer\canable2_host.nsi
+;             /DAPPVER=30.0.2 installer\canable2_host.nsi
 ;
 ;  若检测到已安装版本，自定义页可选：修改 / 修复 / 覆盖
 ; ============================================================================
@@ -22,7 +22,7 @@ Unicode true
   !define OUTFILE "..\dist\CyberBeast-CANable2-Setup.exe"
 !endif
 !ifndef APPVER
-  !define APPVER "30.0.1"
+  !define APPVER "30.0.2"
 !endif
 ; 测试用可覆盖项：安装目录 / 请求权限级别
 !ifndef INSTALLDIR
@@ -44,7 +44,7 @@ InstallDirRegKey HKLM "${REGKEY}" "InstallLocation"
 RequestExecutionLevel ${REQLEVEL}
 SetCompressor /SOLID lzma
 
-VIProductVersion "30.0.1.0"
+VIProductVersion "30.0.2.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APPNAME} 安装程序"
