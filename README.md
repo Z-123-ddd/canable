@@ -1,16 +1,16 @@
 # CyberBeast CANable2-N32
 
-基于 **N32H473** 的 USB–CAN/CAN FD 调试器固件，以及配套 **Qt6 上位机**（CyberBeast CANable 2）。
+基于 **N32H473** 的 USB–CAN/CAN FD 调试器固件，以及配套 **Qt6 上位机**（CyberBeast 协议调试工具）。
 
 | 构件 | 版本 | 说明 |
 |------|------|------|
 | 固件 | **v30.0.2** | `Makefile` → `FW_VERSION`；Keil 见 `inc/git_version.h` |
-| 上位机 | **30.0.2** | `host/CMakeLists.txt` / `host/package.sh` |
+| 上位机 | **30.0.3** | `host/CMakeLists.txt` / `host/package.sh` |
 
 发行物（本仓库）：
 
 - 固件：`release/canable2-n32-v30.0.2.bin`（及 `.hex`）
-- 上位机：`host/dist/CyberBeast-CANable2-Setup-30.0.2.exe`、`host/dist/CyberBeast-CANable2-30.0.2-portable.zip`
+- 上位机：`host/dist/CyberBeast-ProtocolTool-Setup-30.0.3.exe`、`host/dist/CyberBeast-ProtocolTool-30.0.3-portable.zip`
 
 ---
 

@@ -2,7 +2,7 @@
 ;  CANable2-N32 上位机 安装程序脚本 (NSIS 3.x, Unicode)
 ;  用法（由 host/package.sh 调用）：
 ;    makensis /DDEPLOYDIR=..\build\deploy /DOUTFILE=..\dist\xxx.exe \
-;             /DAPPVER=30.0.2 installer\canable2_host.nsi
+;             /DAPPVER=30.0.3 installer\canable2_host.nsi
 ;
 ;  若检测到已安装版本，自定义页可选：修改 / 修复 / 覆盖
 ; ============================================================================
@@ -19,23 +19,27 @@ Unicode true
   !define DEPLOYDIR "..\build\deploy"
 !endif
 !ifndef OUTFILE
-  !define OUTFILE "..\dist\CyberBeast-CANable2-Setup.exe"
+  !define OUTFILE "..\dist\CyberBeast-ProtocolTool-Setup.exe"
 !endif
 !ifndef APPVER
-  !define APPVER "30.0.2"
+  !define APPVER "30.0.3"
+!endif
+; 随包内置的 Npcap 安装程序文件名（由 package.sh 用 /DNPCAP_EXE 传入）
+!ifndef NPCAP_EXE
+  !define NPCAP_EXE "npcap-1.89.exe"
 !endif
 ; 测试用可覆盖项：安装目录 / 请求权限级别
 !ifndef INSTALLDIR
-  !define INSTALLDIR "D:\Programs\CyberBeast-CANable2"
+  !define INSTALLDIR "D:\Programs\CyberBeast-ProtocolTool"
 !endif
 !ifndef REQLEVEL
   !define REQLEVEL admin
 !endif
 
-!define APPNAME    "CyberBeast CANable 2"
-!define APPEXE     "CyberBeast-CANable2.exe"
+!define APPNAME    "CyberBeast 协议调试工具"
+!define APPEXE     "CyberBeast-ProtocolTool.exe"
 !define PUBLISHER  "CyberBeast"
-!define REGKEY     "Software\Microsoft\Windows\CurrentVersion\Uninstall\CyberBeast-CANable2"
+!define REGKEY     "Software\Microsoft\Windows\CurrentVersion\Uninstall\CyberBeast-ProtocolTool"
 
 Name "${APPNAME}"
 OutFile "${OUTFILE}"
@@ -44,7 +48,7 @@ InstallDirRegKey HKLM "${REGKEY}" "InstallLocation"
 RequestExecutionLevel ${REQLEVEL}
 SetCompressor /SOLID lzma
 
-VIProductVersion "30.0.2.0"
+VIProductVersion "30.0.3.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APPNAME} 安装程序"
@@ -189,14 +193,20 @@ Section "品牌串口驱动 (CyberBeast USB2CAN, 可选)" SecCdcDrv
 SectionEnd
 
 
-; Npcap 抓包驱动（EtherCAT 主站运行所需；WinPcap-API 兼容）——可选/静默
-; 若随包提供 installer\Npcap\Npcap-installer.exe，则静默安装；否则跳过。
+; Npcap 抓包驱动（EtherCAT 主站运行所需；WinPcap-API 兼容）——随包内置
+; 安装时调用 Npcap 官方安装程序的图形界面（非静默），由用户按向导完成。
+; 若包内未附带安装程序（$INSTDIR\Npcap\${NPCAP_EXE} 不存在）则跳过。
 Section "Npcap 抓包驱动 (EtherCAT 用, 可选)" SecNpcap
-  IfFileExists "$INSTDIR\Npcap\Npcap-installer.exe" 0 npcap_skip
-    DetailPrint "安装 Npcap (静默 /S)..."
-    nsExec::ExecToLog '"$INSTDIR\Npcap\Npcap-installer.exe" /S'
-    Pop $0
-    DetailPrint "Npcap 安装返回: $0"
+  IfFileExists "$INSTDIR\Npcap\${NPCAP_EXE}" 0 npcap_skip
+    DetailPrint "启动 Npcap 安装程序（图形界面，请按向导完成）..."
+    ; /winpcap_mode=yes 预勾选 “WinPcap API-compatible Mode”（仍显示 GUI）
+    ExecWait '"$INSTDIR\Npcap\${NPCAP_EXE}" /winpcap_mode=yes' $0
+    DetailPrint "Npcap 安装程序返回码: $0"
+    ; 0=成功，3010=成功但需重启；其它视为未完成，仅提示不阻断安装
+    ${If} $0 != 0
+    ${AndIf} $0 != 3010
+      MessageBox MB_OK|MB_ICONEXCLAMATION "Npcap 未安装或未完成（返回码 $0）。\r\nEtherCAT 模式需要 Npcap 才能收发网卡原始帧；可稍后手动运行：\r\n$INSTDIR\Npcap\${NPCAP_EXE}"
+    ${EndIf}
   npcap_skip:
 SectionEnd
 
@@ -250,4 +260,5 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDfuDrv} "安装厂商签名(WHQL)的 NationstechDFU 驱动，用于 USB DFU 固件升级。需管理员；未勾选则仅随包分发驱动文件、不注册。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCdcDrv} "安装品牌化 USB CDC 串口驱动，使设备在设备管理器/端口列表显示为“CyberBeast USB2CAN”。纯命名、非必需（不装也能出 COM 口，只是显示系统默认名）。需管理员；会把一张自签名证书装入本机受信任存储。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecNpcap} "内置 Npcap 官方安装程序，安装时弹出其图形界面向导（非静默）。EtherCAT 主站收发网卡原始帧需要 Npcap（WinPcap 兼容模式）。需管理员；可取消勾选、稍后自行安装。"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END

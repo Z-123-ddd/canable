@@ -175,7 +175,7 @@ static int tallerHeight(const QWidget *w, int lines = 1)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle(QStringLiteral("CyberBeast CANable 2"));
+    setWindowTitle(QStringLiteral("CyberBeast 协议调试工具"));
 
     auto *pageCan = new QWidget;                 // CAN 页（外层，容纳协议调试页栈）
     pageCan->setObjectName("pageCan");
@@ -3300,7 +3300,7 @@ void MainWindow::onAbout()
         const QString devFw = m_deviceFwVersion.isEmpty()
             ? QStringLiteral("未知（未收到版本回包）") : m_deviceFwVersion;
         QMessageBox::about(this, QStringLiteral("关于"),
-            QStringLiteral("<b>CyberBeast CANable 2 上位机</b><br>软件版本：%1<br>设备固件版本：%2")
+            QStringLiteral("<b>CyberBeast 协议调试工具</b><br>软件版本：%1<br>设备固件版本：%2")
                 .arg(QStringLiteral(APP_VERSION), devFw));
     });
 }

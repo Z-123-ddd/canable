@@ -5,11 +5,34 @@
 | 构件 | 版本 | 来源 |
 |---|---|---|
 | 固件 | **v30.0.2** | `Makefile` `FW_VERSION`；Keil 见 `inc/git_version.h` |
-| 上位机 | **30.0.2** | `host/CMakeLists.txt` / `host/package.sh` / NSIS |
+| 上位机 | **30.0.3** | `host/CMakeLists.txt` / `host/package.sh` / NSIS |
 
 ---
 
-## 未发布 (Unreleased) — 上位机：EtherCAT 主站（内嵌 SOEM）
+## v30.0.3（上位机）
+
+### 安装包内置 Npcap（调用 GUI 安装）
+
+- 安装包**内置 Npcap 官方安装程序**（`host/installer/Npcap/npcap-1.89.exe`）；
+  安装过程中以**图形界面**方式调用（ExecWait，非静默），用户按 Npcap 向导完成。
+  调用参数 `/winpcap_mode=yes`（仅预勾选 WinPcap 兼容模式）。组件可取消/跳过。
+- `wpcap_dynload.c` 增加 `<System32>\Npcap\` 全路径兜底加载，未启用 WinPcap 兼容模式也能工作。
+
+---
+
+### 上位机改名：CyberBeast 协议调试工具
+
+- 上位机产品名由「CyberBeast CANable 2」改为 **CyberBeast 协议调试工具**：
+  窗口标题、关于对话框、安装器产品名、开始菜单/桌面快捷方式、卸载项显示名同步更新。
+- 构建产物与安装目录重命名：exe `CyberBeast-ProtocolTool.exe`、安装目录
+  `D:\Programs\CyberBeast-ProtocolTool`、包名 `CyberBeast-ProtocolTool-Setup-<ver>.exe`
+  与 `CyberBeast-ProtocolTool-<ver>-portable.zip`。
+- QSettings 标识随应用名变化，已加入**一次性迁移**：首次启动把旧位置
+  (`CANable2-N32`/`CyberBeast CANable 2`) 的全部键值搬到新位置，老用户配置不丢。
+
+---
+
+### EtherCAT 主站（内嵌 SOEM）
 
 - **模式菜单新增「EtherCAT」**：独立页面，不走串口/USB（AA AA 协议），而是直接扫描主机网卡。
 - 内嵌 **SOEM v2.0.0**（`host/third_party/soem/`，GPLv3；见 LOCAL_PATCHES.md）作为静态库编译进上位机：

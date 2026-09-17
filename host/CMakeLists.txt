@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(canable2_host VERSION 30.0.2 LANGUAGES C CXX)
+project(canable2_host VERSION 30.0.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -74,7 +74,7 @@ add_executable(canable2_host WIN32
 )
 
 # 生成的 exe 文件名（品牌化）；内部 target 名仍为 canable2_host
-set_target_properties(canable2_host PROPERTIES OUTPUT_NAME "CyberBeast-CANable2")
+set_target_properties(canable2_host PROPERTIES OUTPUT_NAME "CyberBeast-ProtocolTool")
 
 target_include_directories(canable2_host PRIVATE src ${LIBUSB_INCLUDE_DIR})
 
@@ -94,7 +94,7 @@ add_custom_command(TARGET canable2_host POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${LIBUSB_ROOT}/bin/libusb-1.0.dll"
         "$<TARGET_FILE_DIR:canable2_host>"
-    COMMENT "Copy libusb-1.0.dll next to CyberBeast-CANable2.exe"
+    COMMENT "Copy libusb-1.0.dll next to CyberBeast-ProtocolTool.exe"
 )
 
 # 厂商 DFU 运行时（32 位 helper + 两个 DLL）拷到 exe 旁的 vendor_dfu/
@@ -102,5 +102,5 @@ add_custom_command(TARGET canable2_host POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor_dfu"
         "$<TARGET_FILE_DIR:canable2_host>/vendor_dfu"
-    COMMENT "Copy vendor_dfu runtime (nsi_dfu_flash.exe + NsMcuCmdDll.dll) next to CyberBeast-CANable2.exe"
+    COMMENT "Copy vendor_dfu runtime (nsi_dfu_flash.exe + NsMcuCmdDll.dll) next to CyberBeast-ProtocolTool.exe"
 )

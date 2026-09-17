@@ -9,7 +9,12 @@
   （因此 CMake 不再定义 `_UCRT`、不再链接 `ucrt`。）
 
 其余文件与上游一致（`include/soem/*`、`src/*.c`、`osal/win32/*`、
-`oshw/win32/*`、`oshw/win32/wpcap/*`、`LICENSE.md`）。
+`oshw/win32/wpcap/*`、`LICENSE.md`）。
+
+**新增文件（上游没有）**：`oshw/win32/wpcap_dynload.c` —— 不链接 wpcap 导入库，
+改为运行时动态加载 `wpcap.dll`（只 shim SOEM 用到的 6 个 pcap 函数）；
+并按名字或 `<System32>\Npcap\<name>` 全路径兜底加载，以兼容未启用
+WinPcap 兼容模式的 Npcap 安装。
 生成文件 `include/soem/ec_options.h` 由 `ec_options.h.in` 按上游默认值展开。
 
 WIN32 网络层使用 **WinPcap API**（`wpcap.dll`/`Packet.dll`）；

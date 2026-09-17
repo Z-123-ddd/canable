@@ -11,16 +11,36 @@
  * ==========================================================================*/
 #define HAVE_REMOTE
 #include <windows.h>
+#include <stdio.h>
 #include <pcap.h>
 
 static HMODULE g_wpcap = NULL;
 
+/* 按名字或 <System32>\Npcap\<name> 全路径尝试加载。
+   Npcap 默认把 wpcap.dll/Packet.dll 装在 System32\Npcap 子目录下，只有启用
+   “WinPcap API-compatible Mode” 才会同时拷到 System32 根下；这里按全路径兜底，
+   使未启用该模式（或用户取消勾选）时也能加载。 */
+static HMODULE ec_try_load(const char *name)
+{
+    HMODULE h = LoadLibraryA(name);
+    if (h != NULL)
+        return h;
+    char dir[MAX_PATH];
+    UINT n = GetSystemDirectoryA(dir, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%s\\Npcap\\%s", dir, name);
+        h = LoadLibraryA(path);
+    }
+    return h;
+}
+
 static void *ec_load_sym(const char *name)
 {
     if (g_wpcap == NULL)
-        g_wpcap = LoadLibraryA("wpcap.dll");
+        g_wpcap = ec_try_load("wpcap.dll");
     if (g_wpcap == NULL)
-        g_wpcap = LoadLibraryA("Packet.dll"); /* 兜底：部分环境 */
+        g_wpcap = ec_try_load("Packet.dll"); /* 兜底：部分环境 */
     if (g_wpcap == NULL)
         return NULL;
     return (void *)GetProcAddress(g_wpcap, name);

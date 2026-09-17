@@ -1,7 +1,7 @@
 # vendor_dfu — 厂商 32 位 DFU 运行时（随上位机分发）
 
 上位机是 64 位，无法同进程加载厂商 32 位 `NsMcuCmdDll.dll`，故这里放一个
-32 位 CLI `nsi_dfu_flash.exe`，由 `CyberBeast-CANable2.exe` 用 QProcess 调用。
+32 位 CLI `nsi_dfu_flash.exe`，由 `CyberBeast-ProtocolTool.exe` 用 QProcess 调用。
 
 ## 文件
 - `nsi_dfu_flash.c` / `build.bat` — helper 源码与构建脚本（MSVC x86）

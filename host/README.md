@@ -47,7 +47,7 @@
 | 通用 CSV (`.csv`) | SavvyCAN 等 | 单列十六进制 或 每字节一列；兼容 python-can Base64 |
 
 > 当前列表不支持远程帧(RTR)：导入时跳过并计数提示；错误帧/注释行同样跳过。
-> 无头验证：`CyberBeast-CANable2.exe --import-trace <file>`。
+> 无头验证：`CyberBeast-ProtocolTool.exe --import-trace <file>`。
 
 ## 构建（Windows，工具链在 D 盘）
 ```bash
@@ -55,22 +55,22 @@ source /d/Qt/qt-tools-env.sh          # 或 cmd: call D:\Qt\qt-tools-env.bat
 cd host
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=D:/Qt/6.8.3/mingw_64
 cmake --build build
-# 产物: host/build/CyberBeast-CANable2.exe
+# 产物: host/build/CyberBeast-ProtocolTool.exe
 ```
 
 运行需要 Qt DLL 与 `libusb-1.0.dll`（构建后自动拷到 exe 同目录）：
 ```bash
-./build/CyberBeast-CANable2.exe
+./build/CyberBeast-ProtocolTool.exe
 ```
 
 无头自检：
 ```bash
-./build/CyberBeast-CANable2.exe --selftest     # 协议编解码自检
-./build/CyberBeast-CANable2.exe --uitest       # 界面逻辑自检（含传输切换）
-./build/CyberBeast-CANable2.exe --guitest      # GUI 烧机自检：打开主窗口→短暂运行→自动关闭退出
-./build/CyberBeast-CANable2.exe --usb-open     # 枚举 libusb 设备并尝试打开
-./build/CyberBeast-CANable2.exe --dfu-scan       # 枚举 USB 并判断 DFU 设备是否在线
-./build/CyberBeast-CANable2.exe --dfu-selftest   # DFU(DfuSe) 编码/布局解析离线自测
+./build/CyberBeast-ProtocolTool.exe --selftest     # 协议编解码自检
+./build/CyberBeast-ProtocolTool.exe --uitest       # 界面逻辑自检（含传输切换）
+./build/CyberBeast-ProtocolTool.exe --guitest      # GUI 烧机自检：打开主窗口→短暂运行→自动关闭退出
+./build/CyberBeast-ProtocolTool.exe --usb-open     # 枚举 libusb 设备并尝试打开
+./build/CyberBeast-ProtocolTool.exe --dfu-scan       # 枚举 USB 并判断 DFU 设备是否在线
+./build/CyberBeast-ProtocolTool.exe --dfu-selftest   # DFU(DfuSe) 编码/布局解析离线自测
 ```
 
 > libusb 路径需设备的驱动为 WinUSB/libusbK（可用 [Zadig](https://zadig.akeo.ie/) 安装）。
@@ -91,7 +91,7 @@ USB 重新枚举为 **DFU 设备 `0x19F5:0x4537`（"N32-BOOTLOADER"）** → 弹
 - 若 `vendor_dfu/` 缺失，自动回退到 `src/dfu_device.cpp` 的 libusb DfuSe 实现。
 - Windows 需安装厂商签名驱动 **NationstechDFU**（安装包「DFU 驱动」可选组件，`pnputil` 注册）；
   否则 32 位 DLL 打不开 DFU 设备。
-- 无头验证：`CyberBeast-CANable2.exe --vendor-flash <bin> [addr]`。
+- 无头验证：`CyberBeast-ProtocolTool.exe --vendor-flash <bin> [addr]`。
 
 ## 串口显示名（可选品牌化驱动）
 

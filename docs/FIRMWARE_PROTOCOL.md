@@ -214,9 +214,9 @@ GET_STATUS 的 `err` 字段为 32 位错误寄存器的低 8 位十六进制，�
   由厂商 DLL 烧录。
 
 ### 9.3 验证
-- `CyberBeast-CANable2.exe --dfu-selftest`：DfuSe 命令编码 / 内存布局解析 / 扇区计算（无硬件）。
-- `CyberBeast-CANable2.exe --dfu-scan`：枚举 USB 并判断 DFU 设备是否在线。
-- `CyberBeast-CANable2.exe --vendor-flash <bin> [addr]`：无头走厂商 DLL 烧录（需设备已在 DFU 模式）。
+- `CyberBeast-ProtocolTool.exe --dfu-selftest`：DfuSe 命令编码 / 内存布局解析 / 扇区计算（无硬件）。
+- `CyberBeast-ProtocolTool.exe --dfu-scan`：枚举 USB 并判断 DFU 设备是否在线。
+- `CyberBeast-ProtocolTool.exe --vendor-flash <bin> [addr]`：无头走厂商 DLL 烧录（需设备已在 DFU 模式）。
 
 ---
 

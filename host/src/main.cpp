@@ -1152,8 +1152,17 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
-    QApplication::setApplicationName("CyberBeast CANable 2");
     QApplication::setOrganizationName("CANable2-N32");
+    QApplication::setApplicationName(QStringLiteral("CyberBeast 协议调试工具"));
+    // 改名后 QSettings 默认路径会变：把旧位置 (CANable2-N32 / CyberBeast CANable 2)
+    // 的键值一次性搬到新位置，避免老用户配置/窗口几何丢失。
+    {
+        QSettings curSt;
+        if (curSt.allKeys().isEmpty()) {
+            QSettings oldSt(QStringLiteral("CANable2-N32"), QStringLiteral("CyberBeast CANable 2"));
+            for (const QString &k : oldSt.allKeys()) curSt.setValue(k, oldSt.value(k));
+        }
+    }
 
     // 整体字号放大两号
     {
