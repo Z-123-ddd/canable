@@ -4,10 +4,18 @@
 
 | 构件 | 版本 | 来源 |
 |---|---|---|
-| 固件 | **v30.0.2** | `Makefile` `FW_VERSION`；Keil 见 `inc/git_version.h` |
-| 上位机 | **30.0.3** | `host/CMakeLists.txt` / `host/package.sh` / NSIS |
+| 固件 | **v30.0.4** | `Makefile` `FW_VERSION`；Keil 见 `inc/git_version.h` |
+| 上位机 | **30.0.4** | `host/CMakeLists.txt` / `host/package.sh` / NSIS |
 
 ---
+
+## v30.0.4（固件 + 上位机）
+
+- **固件与上位机版本统一为 v30.0.4**；重建固件 release 产物为 v30.0.4。
+- 固件：新增接收暂停命令码 11（SET_PAUSE）——暂停时停 CAN 收发中断并清未完成帧，恢复时丢弃滞留帧。
+- 上位机：接收区「暂停/继续接收」按钮、四协议接收解析区、CyberBeast 配置/接收区。
+
+---
 
 ## v30.0.3（上位机）
 
@@ -43,6 +51,21 @@
   用 EtherCAT 时再提示。安装包内含可选 **Npcap 静默安装**段（放 `installer/Npcap/Npcap-installer.exe` 即随包安装）。
 - EtherCAT 页功能：**扫描网卡 / 打开关闭 / 扫描从站（ecx_config_init）/ 从站列表
   / 过程数据映射与周期收发（WKC）/ CoE(SDO) 读写**。
+
+---
+
+### 接收暂停（命令 11）+ 协议解析区 + CyberBeast 配置/接收区
+
+- **固件新增命令 11（SET_PAUSE）**：暂停时停止 CAN 发送任务/定时器与 FDCAN 接收/错误中断，
+  清空软件接收队列（未完成/已缓存帧）；恢复时丢弃硬件 FIFO 滞留帧、清空队列并重新使能中断，
+  避免恢复后出现坏数据。见 `docs/FIRMWARE_PROTOCOL.md` 命令表。
+- **上位机接收区新增「暂停/继续接收」按钮**：点击下发命令 11、冻结本机接收、重置字节流解析器
+  并清空未完成帧；各页接收区各一枚，状态同步。
+- **接收区下方 1/3 新增「解析区」**（Simple / Open / CyberBeast / RS485 四个协议页）：
+  按《守护兽协议手册》把每帧解析为 **ID号 / 命令功能 / 数据含义（整数或浮点）**，逐帧追加。
+- **CyberBeast 协议页**由骨架补齐：命令按**类别下拉**（实时控制/配置管理/状态查询/系统管理/广播紧急）
+  → 命令下拉 → 参数（仿 simple/open），含预览与接收区（就地/滚动/暂停/解析）。
+- 新增 `host/src/FrameParse.{h,cpp}`：四协议 + 通用的接收帧解析。
 
 ---
 

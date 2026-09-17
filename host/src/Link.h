@@ -30,6 +30,9 @@ public:
     // 等待发送缓冲排空（默认无操作；串口实现会阻塞至写完）
     virtual void flush() {}
 
+    // 重置接收字节流解析器（丢弃未完成/半成品帧；用于“暂停接收”清未完成帧）
+    void resetRxParser() { resetParser(); }
+
 signals:
     void opened(const QString &name);
     void closed();

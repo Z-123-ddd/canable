@@ -29,6 +29,7 @@
 #include <cstdio>
 #include "HexFormat.h"
 #include "MainWindow.h"
+#include "FrameParse.h"
 #include "Protocol.h"
 #include "SimpleProto.h"
 #include "CanOpenProto.h"
@@ -329,7 +330,8 @@ static int runUiTest()
         // 日志共享：触发一次警告 -> 每份日志都出现
         auto *rsSend = w.findChild<QPushButton *>("rs485SendBtn");
         QVector<QPlainTextEdit *> logs;
-        for (QPlainTextEdit *le : w.findChildren<QPlainTextEdit *>()) logs << le;
+        for (QPlainTextEdit *le : w.findChildren<QPlainTextEdit *>())
+            if (le->objectName().startsWith(QStringLiteral("log"))) logs << le;   // 仅日志面板（排除解析区）
         if (rsSend && logs.size() == 6) {   // 5 页 buildLogGroup + EtherCAT 页
             rsSend->click();
             logFanoutOk = true;
@@ -343,6 +345,61 @@ static int runUiTest()
         std::fputs(line.toLocal8Bit().constData(), stdout);
     }
     ok = ok && pagesConnOk && connSyncOk && logFanoutOk;
+
+    // ---- 接收暂停 + 解析区 + CyberBeast 配置区 ----
+    {
+        bool pauseOk = false, parseOk = false, cbPageOk = false;
+
+        // 暂停按钮：每个接收区一个；点击切换文本
+        QVector<QPushButton *> pbs;
+        for (QPushButton *b : w.findChildren<QPushButton *>())
+            if (b->objectName() == QStringLiteral("pauseRxBtn")) pbs << b;
+        pauseOk = (pbs.size() >= 5);
+        if (!pbs.isEmpty()) {
+            QPushButton *b = pbs.first();
+            const QString t0 = b->text();
+            b->click();                                  // 暂停
+            const bool paused = (b->text() != t0);
+            b->click();                                  // 恢复
+            pauseOk = pauseOk && paused && (b->text() == t0);
+        }
+
+        // 解析区：4 个协议页各一份
+        auto *pcb = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_cyberbeast"));
+        auto *psi = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_simple"));
+        auto *pco = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_canopen"));
+        auto *prs = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_rs485"));
+        parseOk = (pcb && psi && pco && prs);
+
+        // 解析正确性：CyberBeast MIT 响应帧 → 字段可读；喂帧后解析区追加
+        if (parseOk && pcb) {
+            proto::RxFrame f;
+            f.ext = true;
+            f.id = (2u<<26) | (0x00u<<18) | (0x05u<<10) | (0x03u<<2) | 1u;   // Pri=2 MIT Dest=5 Src=3
+            f.data = QByteArray::fromHex("0010A0C000000000");
+            const int beforeLen = pcb->toPlainText().size();
+            w.simulateRx(f);
+            const QString cbLine = frameParse::cyberBeast(f);
+            parseOk = parseOk && (pcb->toPlainText().size() > beforeLen)
+                   && cbLine.contains(QStringLiteral("MIT_CONTROL"))
+                   && cbLine.contains(QStringLiteral("Pos="))
+                   && !psi->toPlainText().trimmed().isEmpty();
+        }
+
+        // CyberBeast 配置区控件
+        cbPageOk = w.findChild<QComboBox *>(QStringLiteral("cbCatBox"))
+                && w.findChild<QComboBox *>(QStringLiteral("cbCmdBox"))
+                && w.findChild<QPushButton *>(QStringLiteral("cbSendBtn"))
+                && w.findChild<QPushButton *>(QStringLiteral("cbStopBtn"))
+                && w.findChild<QTableWidget *>(QStringLiteral("cbRxTable"))
+                && w.findChild<QLineEdit *>(QStringLiteral("cbPreview"));
+
+        QString line = QStringLiteral("UITEST pause/parse cb=%1 pause=%2 parse=%3")
+                           .arg(cbPageOk ? 1 : 0).arg(pauseOk ? 1 : 0).arg(parseOk ? 1 : 0);
+        line += QChar(10);
+        std::fputs(line.toLocal8Bit().constData(), stdout);
+        ok = ok && pauseOk && parseOk && cbPageOk;
+    }
 
     // ---- Simple 协议页：命令下拉 / 参数 / 预览换算 ----
     bool simpleOk = false;

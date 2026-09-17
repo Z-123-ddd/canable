@@ -91,6 +91,8 @@ public:
 
     // 接收区：把一帧写入接收表（按 id 就地更新，不滚动）；供 UI 与无头自测调用
     void feedRx(const proto::RxFrame &f);
+    // 供无头自测：模拟收到一帧（走完整 onFrameReceived 流程：接收表+解析区）
+    void simulateRx(const proto::RxFrame &f);
     int  rxRowCount() const;
     QString rxCellText(int row, int col) const;
     // 接收区：滚动视图文本（供无头自测读取）
@@ -134,6 +136,14 @@ private slots:
     void onStop();
     void onQueryStatus();
     void onAbout();                 // 帮助：关于（显示软件/固件版本，点击时自动查询命令 10）
+
+    // ---- 接收暂停（冻结接收 + 清未完成帧）----
+    void onTogglePause();               // 暂停/恢复接收（下发命令 11 + 冻结本机接收）
+    // ---- CyberBeast 协议页（按类别下拉，仿 simple/open）----
+    void onCbCatChanged(int idx);       // 类别切换 → 重建命令下拉
+    void onCbCmdChanged(int idx);       // 命令切换 → 重建参数输入
+    void onCbSend();
+    void onCbStop();
 
     // Simple 协议页
     void onSimpleCmdChanged(int idx);   // 命令下拉变化 → 重建参数输入
@@ -240,6 +250,20 @@ private:
     void simpleSetRxMode(bool scroll);
 
     void setProtocol(int which);    // 协议菜单：切协议调试页（0=CyberBeast 1=Simple 2=Open）
+    // ---- 接收“解析区”（4 个协议页接收区下方 1/3）----
+    void registerParseArea(const QString &key, QPlainTextEdit *pe);
+    void appendParse(const QString &key, const proto::RxFrame &f);   // 按 key 协议解析并追加
+    QPushButton *makePauseButton();          // 生成接收区“暂停/恢复”按钮并登记
+    void applyPauseUi();                     // 按 m_rxPaused 刷新所有暂停按钮文本/接收状态
+    // ---- CyberBeast 协议页 ----
+    void rebuildCbCommands();                // 按类别重建命令下拉
+    void rebuildCbParams();                  // 按命令重建参数输入框
+    void updateCbPreview();                  // 刷新预览（CAN ID / 数据 hex）
+    QByteArray buildCbFrame(QString *err) const;   // 生成 CyberBeast 线上帧
+    void cbFeedRx(const proto::RxFrame &f);
+    void cbAppendScroll(const QString &dir, const proto::RxFrame &f);
+    void cbSetRxMode(bool scroll);
+
 
     SerialLink *m_serial = nullptr;
     UsbLink    *m_usb = nullptr;
@@ -434,6 +458,32 @@ private:
     QByteArray   m_coLastFrame;                 // 上次发送的帧（判变化）
     int          m_coPdoFunc = -1;              // 上次填充默认映射的 PDO 功能（-1=无）
     bool         m_coLastInit = false;
+
+    // ---- 接收暂停 ----
+    bool m_rxPaused = false;                 // true=接收已暂停（下发命令 11 + 冻结本机）
+    QVector<QPushButton *> m_pauseBtns;      // 各接收区的暂停按钮（文本随状态刷新）
+    QHash<QString, QPlainTextEdit *> m_parseAreas;   // 协议 key -> 解析区文本控件
+    QLineEdit *m_rxPartialEdit = nullptr;    // (预留)
+    // ---- CyberBeast 协议页控件 ----
+    QLineEdit   *m_cbMasterEdit = nullptr;   // 主站(源)地址
+    QLineEdit   *m_cbDestEdit = nullptr;     // 目标设备/位掩码（广播）
+    QComboBox   *m_cbCatBox = nullptr;       // 类别下拉
+    QComboBox   *m_cbCmdBox = nullptr;       // 命令下拉
+    QWidget     *m_cbParamArea = nullptr;    // 参数输入容器
+    QVector<QLineEdit *> m_cbParamEdits;     // 参数输入框（随命令重建）
+    QLineEdit   *m_cbPreview = nullptr;      // 预览
+    QPushButton *m_cbSendBtn = nullptr;
+    QPushButton *m_cbStopBtn = nullptr;
+    QTableWidget *m_cbRxTable = nullptr;
+    QTableWidget *m_cbScrollTable = nullptr;
+    QHash<quint32,int> m_cbRxRowById;
+    QToolButton *m_cbModeBtn = nullptr;
+    QLabel      *m_cbModeLbl = nullptr;
+    QCheckBox   *m_cbTsBox = nullptr;
+    QPushButton *m_cbClearRxBtn = nullptr;
+    bool         m_cbScrollMode = false;
+    QByteArray   m_cbLastFrame;
+    bool         m_cbLastInit = false;
 
     // DFU 设备检测轮询
     QTimer *m_dfuPollTimer = nullptr;

@@ -60,6 +60,7 @@ static uint8_t tx_job_active = 0;          // 1 = a periodic job is being pumped
 static uint8_t tx_job_single_pass = 0;     // FRAMELIST: 1 = stop after one pass
 static uint16_t tx_list_pos = 0;           // FRAMELIST: FIFO cursor into active list
 static uint32_t tx_drop_count = 0;         // pending-list overwrites (oldest dropped)
+static uint8_t can_paused = 0;             // 1 = host paused reception/TX
 
 // ---- Auto bitrate scan state ----
 #define CAN_SCAN_ERR_THRESHOLD   8u     // REC/TEC at/above this => bus trouble
@@ -617,6 +618,7 @@ static void can_scan_switch(uint8_t idx, uint32_t now)
 
 void can_scan_poll(void)
 {
+    if (can_paused) return;
     uint32_t now = system_get_ticks();
 
     // Track the most recent RX activity (frames stored by the ISR).
@@ -796,6 +798,7 @@ void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data)
 // single-shot enqueue was refused by the hardware (FIFO full / off-bus).
 int32_t can_tx_start(can_tx_trigger_t trigger)
 {
+    if (can_paused) return -1;   // reception/TX paused by the host
     if (can_send_mode == CAN_SEND_MODE_FRAMELIST)
     {
         // Commit: a non-empty pending burst replaces the active list; an empty
@@ -854,12 +857,85 @@ void can_tx_stop(void)
     can_timer_disable();
 }
 
+// Drop every frame already sitting in the hardware RX FIFO0 (read & discard).
+static void can_rx_hw_flush(void)
+{
+    FDCAN_RxHeaderType th;
+    uint8_t td[RXQUEUE_DATALEN];
+    while (FDCAN_GetRxFifoFillLevel(FDCAN1, FDCAN_RX_FIFO0) > 0)
+    {
+        if (FDCAN_GetRxMsg(FDCAN1, FDCAN_RX_FIFO0, &th, td) != SUCCESS)
+            break;
+    }
+}
+
+// Reset the software RX ring (drop complete and half-assembled frames).
+static void can_rx_queue_flush(void)
+{
+    __disable_irq();
+    rxqueue.head = 0;
+    rxqueue.tail = 0;
+    error_clear(ERR_CANRXFIFO_OVERFLOW);
+    __enable_irq();
+}
+
+uint8_t can_get_pause(void)
+{
+    return can_paused;
+}
+
+// Host "stop accepting": stop the TX pump, stop the FDCAN reception
+// interrupts, and flush the RX queue so the resumed session starts clean.
+void can_set_pause(uint8_t paused)
+{
+    paused = (paused != 0) ? 1 : 0;
+    if (paused == can_paused)
+        return;
+
+    if (paused)
+    {
+        // Stop transmitting: abort the job and the periodic timer.
+        can_tx_stop();          // also disables the send timer
+        can_timer_disable();
+        // Stop working reception: deactivate the FDCAN line-0 interrupts.
+        FDCAN_DeactivateInt(FDCAN1,
+                            FDCAN_INT_RX_FIFO0_NEW_MESSAGE |
+                            FDCAN_INT_ARB_PROTOCOL_ERROR |
+                            FDCAN_INT_DATA_PROTOCOL_ERROR |
+                            FDCAN_INT_BUS_OFF);
+        // Drop anything already queued (complete or half-assembled).
+        can_rx_queue_flush();
+        can_paused = 1;
+    }
+    else
+    {
+        // Discard stale hardware frames so the resumed session starts clean.
+        if (bus_state == ON_BUS)
+            can_rx_hw_flush();
+        can_rx_queue_flush();
+        // Re-arm reception / error interrupts.
+        if (bus_state == ON_BUS)
+        {
+            FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_INTERRUPT_LINE0);
+            FDCAN_ActivateInt(FDCAN1, FDCAN_INT_RX_FIFO0_NEW_MESSAGE, FDCAN_TX_BUFFER0);
+            FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_ARB_PROTOCOL_ERROR, FDCAN_INTERRUPT_LINE0);
+            FDCAN_ActivateInt(FDCAN1, FDCAN_INT_ARB_PROTOCOL_ERROR, FDCAN_TX_BUFFER0);
+            FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_DATA_PROTOCOL_ERROR, FDCAN_INTERRUPT_LINE0);
+            FDCAN_ActivateInt(FDCAN1, FDCAN_INT_DATA_PROTOCOL_ERROR, FDCAN_TX_BUFFER0);
+            FDCAN_ConfigIntLine(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_INTERRUPT_LINE0);
+            FDCAN_ActivateInt(FDCAN1, FDCAN_INT_BUS_OFF, FDCAN_TX_BUFFER0);
+        }
+        can_paused = 0;
+    }
+}
+
 // Drain the FDCAN hardware Rx FIFO 0 into the software RX queue.
 // Called from the FDCAN1_INT0 ISR only (single producer).
 // If the software ring is full the OLDEST queued frame is overwritten and
 // ERR_CANRXFIFO_OVERFLOW is raised (sticky until the host drains via can_rx).
 void can_rx_isr(void)
 {
+    if (can_paused) return;
     while (FDCAN_GetRxFifoFillLevel(FDCAN1, FDCAN_RX_FIFO0) > 0)
     {
         uint16_t next = (uint16_t)((rxqueue.head + 1) % RXQUEUE_LEN);
@@ -938,6 +1014,7 @@ uint8_t is_can_msg_pending(uint8_t fifo)
 //                          (CONTINUOUS).
 void can_send_timer_tick(void)
 {
+    if (can_paused) return;
     if (bus_state != ON_BUS)
         return;
 

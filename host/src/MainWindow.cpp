@@ -9,6 +9,9 @@
 #include "CanOpenProto.h"
 #include "EtherCatLink.h"
 #include "ObjectDictionaryDialog.h"
+#include "FrameParse.h"
+#include <cstring>
+#include <cmath>
 
 #include <QWidget>
 #include <QVBoxLayout>
@@ -64,6 +67,24 @@ static int uiEm(const QWidget *w)
 {
     const int h = w ? w->fontMetrics().height() : QApplication::fontMetrics().height();
     return qMax(12, h);
+}
+
+// 接收区下方 1/3：按协议手册解析的「解析区」（只读文本，逐帧一行）
+static QGroupBox *makeParseGroup(QPlainTextEdit **outEdit, const QString &title)
+{
+    auto *box = new QGroupBox(title);
+    auto *v = new QVBoxLayout(box);
+    v->setContentsMargins(6, 4, 6, 4);
+    auto *pe = new QPlainTextEdit;
+    pe->setReadOnly(true);
+    pe->setMaximumBlockCount(1000);
+    pe->setPlaceholderText(QStringLiteral("按协议手册解析：ID号 / 命令功能 / 数据含义（整数或浮点）"));
+    QFont pf = pe->font();
+    pf.setPointSize(qMax(8, pf.pointSize() - 1));
+    pe->setFont(pf);
+    v->addWidget(pe);
+    if (outEdit) *outEdit = pe;
+    return box;
 }
 
 static QSplitter *makeHSplit(QWidget *left, QWidget *right, int stretchL = 3, int stretchR = 2)
@@ -360,6 +381,8 @@ MainWindow::MainWindow(QWidget *parent)
     rtop->addWidget(m_modeBtn);
     rtop->addSpacing(12);
     rtop->addWidget(m_tsBox);
+    rtop->addSpacing(12);
+    rtop->addWidget(makePauseButton());      // 暂停/恢复接收
     rtop->addStretch();
     rv->addLayout(rtop);
 
@@ -548,6 +571,8 @@ MainWindow::MainWindow(QWidget *parent)
         rtop->addWidget(m_rs485ModeBtn);
         rtop->addSpacing(12);
         rtop->addWidget(m_rs485TsBox);
+        rtop->addSpacing(12);
+        rtop->addWidget(makePauseButton());
         rtop->addStretch();
         rv->addLayout(rtop);
 
@@ -569,7 +594,7 @@ MainWindow::MainWindow(QWidget *parent)
         rv->addWidget(makeRxFilterRow(QStringLiteral("rs485.rx"), m_rs485RxTable,
             { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
               QStringLiteral("数据"), QStringLiteral("次数") }));
-        rv->addWidget(m_rs485RxTable, 1);
+        rv->addWidget(m_rs485RxTable, 2);
 
         m_rs485ScrollTable = new QTableWidget(0, SC_COL_COUNT);
         m_rs485ScrollTable->setObjectName("rs485Scroll");
@@ -590,7 +615,7 @@ MainWindow::MainWindow(QWidget *parent)
         rv->addWidget(makeRxFilterRow(QStringLiteral("rs485.scroll"), m_rs485ScrollTable,
             { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
               QStringLiteral("长度"), QStringLiteral("数据") }));
-        rv->addWidget(m_rs485ScrollTable, 1);
+        rv->addWidget(m_rs485ScrollTable, 2);
 
         auto *rb = new QHBoxLayout;
         m_rs485ClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
@@ -598,6 +623,9 @@ MainWindow::MainWindow(QWidget *parent)
         rb->addWidget(m_rs485ClearRxBtn);
         rb->addStretch();
         rv->addLayout(rb);
+        { QPlainTextEdit *pe = nullptr;
+          rv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（RS485 / Modbus RTU）")), 1);
+          registerParseArea(QStringLiteral("rs485"), pe); }
         rsroot->setContentsMargins(6, 6, 6, 6);
         rsroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
     }
@@ -732,12 +760,157 @@ MainWindow::MainWindow(QWidget *parent)
     m_pageProtoCyberBeast = new QWidget;
     m_pageProtoCyberBeast->setObjectName("pageProtoCyberBeast");
     {
-        auto *v = new QVBoxLayout(m_pageProtoCyberBeast);
-        v->addWidget(buildConnGroup());
-        auto *l = new QLabel(QStringLiteral("CyberBeast 协议调试页（骨架，待实现）"));
-        l->setAlignment(Qt::AlignCenter);
-        v->addWidget(l, 1);
-        v->addWidget(buildLogGroup(), 1);
+        auto *croot = new QHBoxLayout(m_pageProtoCyberBeast);
+
+        // ---------- 左：连接 + 命令区 + 参数 + 预览 + 日志 ----------
+        auto *lcol = new QWidget;
+        auto *lcl = new QVBoxLayout(lcol);
+        lcl->addWidget(buildConnGroup());
+
+        auto *cBox = new QGroupBox(QStringLiteral("命令 (CyberBeast v2.4)"));
+        auto *cg = new QGridLayout(cBox);
+        cg->addWidget(new QLabel(QStringLiteral("主站(源):")), 0, 0);
+        m_cbMasterEdit = new QLineEdit(QStringLiteral("1"));
+        m_cbMasterEdit->setObjectName("cbMasterEdit");
+        cg->addWidget(m_cbMasterEdit, 0, 1);
+        cg->addWidget(new QLabel(QStringLiteral("目标/位掩码:")), 0, 2);
+        m_cbDestEdit = new QLineEdit(QStringLiteral("1"));
+        m_cbDestEdit->setObjectName("cbDestEdit");
+        cg->addWidget(m_cbDestEdit, 0, 3);
+        cg->addWidget(new QLabel(QStringLiteral("类别:")), 1, 0);
+        m_cbCatBox = new QComboBox;
+        m_cbCatBox->setObjectName("cbCatBox");
+        m_cbCatBox->addItem(QStringLiteral("实时控制"), QStringLiteral("ctrl"));
+        m_cbCatBox->addItem(QStringLiteral("配置管理"), QStringLiteral("config"));
+        m_cbCatBox->addItem(QStringLiteral("状态查询"), QStringLiteral("query"));
+        m_cbCatBox->addItem(QStringLiteral("系统管理"), QStringLiteral("system"));
+        m_cbCatBox->addItem(QStringLiteral("广播/紧急"), QStringLiteral("bcast"));
+        cg->addWidget(m_cbCatBox, 1, 1);
+        cg->addWidget(new QLabel(QStringLiteral("命令:")), 2, 0);
+        m_cbCmdBox = new QComboBox;
+        m_cbCmdBox->setObjectName("cbCmdBox");
+        m_cbCmdBox->setMinimumWidth(uiEm(this) * 14);
+        cg->addWidget(m_cbCmdBox, 2, 1, 1, 3);
+        lcl->addWidget(cBox);
+
+        auto *pBox = new QGroupBox(QStringLiteral("参数"));
+        auto *pv = new QVBoxLayout(pBox);
+        m_cbParamArea = new QWidget;
+        m_cbParamArea->setObjectName("cbParamArea");
+        pv->addWidget(m_cbParamArea);
+        lcl->addWidget(pBox);
+
+        auto *prBox = new QGroupBox(QStringLiteral("预览 (CAN ID / 数据 hex)"));
+        auto *prv = new QVBoxLayout(prBox);
+        m_cbPreview = new QLineEdit;
+        m_cbPreview->setObjectName("cbPreview");
+        m_cbPreview->setReadOnly(true);
+        prv->addWidget(m_cbPreview);
+        lcl->addWidget(prBox);
+
+        auto *cop = new QHBoxLayout;
+        m_cbSendBtn = new QPushButton(QStringLiteral("发送"));
+        m_cbSendBtn->setObjectName("cbSendBtn");
+        m_cbStopBtn = new QPushButton(QStringLiteral("停止"));
+        m_cbStopBtn->setObjectName("cbStopBtn");
+        cop->addWidget(m_cbSendBtn);
+        cop->addWidget(m_cbStopBtn);
+        cop->addStretch();
+        lcl->addLayout(cop);
+        lcl->addWidget(buildLogGroup(), 1);
+
+        // ---------- 右：接收区 ----------
+        auto *crxBox = new QGroupBox(QStringLiteral("接收区"));
+        auto *crv = new QVBoxLayout(crxBox);
+        auto *crtop = new QHBoxLayout;
+        m_cbModeLbl = new QLabel;
+        m_cbModeLbl->setObjectName("cbModeLbl");
+        m_cbModeBtn = new QToolButton;
+        m_cbModeBtn->setObjectName("cbModeBtn");
+        m_cbModeBtn->setText(QStringLiteral("⇄"));
+        m_cbModeBtn->setAutoRaise(true);
+        m_cbTsBox = new QCheckBox(QStringLiteral("显示时间戳"));
+        m_cbTsBox->setObjectName("cbTsBox");
+        crtop->addWidget(m_cbModeLbl);
+        crtop->addWidget(m_cbModeBtn);
+        crtop->addSpacing(12);
+        crtop->addWidget(m_cbTsBox);
+        crtop->addSpacing(12);
+        crtop->addWidget(makePauseButton());
+        crtop->addStretch();
+        crv->addLayout(crtop);
+
+        m_cbRxTable = new QTableWidget(0, RX_COL_COUNT);
+        m_cbRxTable->setObjectName("cbRxTable");
+        m_cbRxTable->setHorizontalHeaderLabels({
+            QStringLiteral("帧ID(hex)"), QStringLiteral("类型"),
+            QStringLiteral("长度"), QStringLiteral("数据(hex)"), QStringLiteral("次数")});
+        m_cbRxTable->horizontalHeader()->setSectionResizeMode(RX_DATA, QHeaderView::Stretch);
+        for (int c = 0; c < RX_COL_COUNT; c++)
+            if (c != RX_DATA) m_cbRxTable->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
+        m_cbRxTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_cbRxTable->setSelectionMode(QAbstractItemView::NoSelection);
+        m_cbRxTable->setShowGrid(false);
+        m_cbRxTable->setFrameShape(QFrame::NoFrame);
+        m_cbRxTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
+        m_cbRxTable->verticalHeader()->setVisible(false);
+        m_cbRxTable->setMinimumWidth(uiEm(this) * 18);
+        crv->addWidget(makeRxFilterRow(QStringLiteral("cb.rx"), m_cbRxTable,
+            { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
+              QStringLiteral("数据"), QStringLiteral("次数") }));
+        crv->addWidget(m_cbRxTable, 2);
+
+        m_cbScrollTable = new QTableWidget(0, SC_COL_COUNT);
+        m_cbScrollTable->setObjectName("cbScroll");
+        m_cbScrollTable->setHorizontalHeaderLabels({
+            QStringLiteral("方向"), QStringLiteral("帧ID(hex)"), QStringLiteral("类型"),
+            QStringLiteral("长度"), QStringLiteral("数据(hex)")});
+        m_cbScrollTable->horizontalHeader()->setSectionResizeMode(SC_DATA, QHeaderView::Stretch);
+        for (int c = 0; c < SC_COL_COUNT; c++)
+            if (c != SC_DATA) m_cbScrollTable->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
+        m_cbScrollTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_cbScrollTable->setSelectionMode(QAbstractItemView::NoSelection);
+        m_cbScrollTable->setShowGrid(false);
+        m_cbScrollTable->setFrameShape(QFrame::NoFrame);
+        m_cbScrollTable->setStyleSheet("QTableWidget{gridline-color:transparent;}");
+        m_cbScrollTable->verticalHeader()->setVisible(false);
+        m_cbScrollTable->setMinimumWidth(uiEm(this) * 18);
+        m_cbScrollTable->setVisible(false);
+        crv->addWidget(makeRxFilterRow(QStringLiteral("cb.scroll"), m_cbScrollTable,
+            { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
+              QStringLiteral("长度"), QStringLiteral("数据") }));
+        crv->addWidget(m_cbScrollTable, 2);
+
+        auto *crb = new QHBoxLayout;
+        m_cbClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
+        m_cbClearRxBtn->setObjectName("cbClearRxBtn");
+        crb->addWidget(m_cbClearRxBtn);
+        crb->addStretch();
+        crv->addLayout(crb);
+        { QPlainTextEdit *pe = nullptr;
+          crv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（CyberBeast）")), 1);
+          registerParseArea(QStringLiteral("cyberbeast"), pe); }
+
+        croot->setContentsMargins(6, 6, 6, 6);
+        croot->addWidget(makeHSplit(lcol, crxBox, 3, 2), 1);
+
+        connect(m_cbCatBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &MainWindow::onCbCatChanged);
+        connect(m_cbCmdBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &MainWindow::onCbCmdChanged);
+        connect(m_cbSendBtn, &QPushButton::clicked, this, &MainWindow::onCbSend);
+        connect(m_cbStopBtn, &QPushButton::clicked, this, &MainWindow::onCbStop);
+        connect(m_cbModeBtn, &QToolButton::clicked, this, [this]() { cbSetRxMode(!m_cbScrollMode); });
+        connect(m_cbClearRxBtn, &QPushButton::clicked, this, [this]() {
+            if (m_cbRxTable) m_cbRxTable->setRowCount(0);
+            if (m_cbScrollTable) m_cbScrollTable->setRowCount(0);
+            m_cbRxRowById.clear(); });
+        connect(m_cbMasterEdit, &QLineEdit::textChanged, this, [this]() { updateCbPreview(); });
+        connect(m_cbDestEdit, &QLineEdit::textChanged, this, [this]() { updateCbPreview(); });
+        rebuildCbCommands();
+        rebuildCbParams();
+        updateCbPreview();
+        cbSetRxMode(false);
     }
     m_pageProtoGeneric = canContent;             // 现有通用 CAN UI
     m_pageProtoSimple = new QWidget;
@@ -820,6 +993,8 @@ MainWindow::MainWindow(QWidget *parent)
         srtop->addWidget(m_simpleModeBtn);
         srtop->addSpacing(12);
         srtop->addWidget(m_simpleTsBox);
+        srtop->addSpacing(12);
+        srtop->addWidget(makePauseButton());
         srtop->addStretch();
         srv->addLayout(srtop);
 
@@ -841,7 +1016,7 @@ MainWindow::MainWindow(QWidget *parent)
         srv->addWidget(makeRxFilterRow(QStringLiteral("simple.rx"), m_simpleRxTable,
             { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
               QStringLiteral("数据"), QStringLiteral("次数") }));
-        srv->addWidget(m_simpleRxTable, 1);
+        srv->addWidget(m_simpleRxTable, 2);
 
         m_simpleScrollTable = new QTableWidget(0, SC_COL_COUNT);
         m_simpleScrollTable->setObjectName("simpleScroll");
@@ -862,7 +1037,7 @@ MainWindow::MainWindow(QWidget *parent)
         srv->addWidget(makeRxFilterRow(QStringLiteral("simple.scroll"), m_simpleScrollTable,
             { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
               QStringLiteral("长度"), QStringLiteral("数据") }));
-        srv->addWidget(m_simpleScrollTable, 1);
+        srv->addWidget(m_simpleScrollTable, 2);
 
         auto *srb = new QHBoxLayout;
         m_simpleClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
@@ -870,6 +1045,9 @@ MainWindow::MainWindow(QWidget *parent)
         srb->addWidget(m_simpleClearRxBtn);
         srb->addStretch();
         srv->addLayout(srb);
+        { QPlainTextEdit *pe = nullptr;
+          srv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（CAN Simple）")), 1);
+          registerParseArea(QStringLiteral("simple"), pe); }
         sroot->setContentsMargins(6, 6, 6, 6);
         sroot->addWidget(makeHSplit(lcol, srxBox, 3, 2), 1);
 
@@ -993,6 +1171,8 @@ MainWindow::MainWindow(QWidget *parent)
         rtop->addWidget(m_coModeBtn);
         rtop->addSpacing(12);
         rtop->addWidget(m_coTsBox);
+        rtop->addSpacing(12);
+        rtop->addWidget(makePauseButton());
         rtop->addStretch();
         rv->addLayout(rtop);
 
@@ -1014,7 +1194,7 @@ MainWindow::MainWindow(QWidget *parent)
         rv->addWidget(makeRxFilterRow(QStringLiteral("co.rx"), m_coRxTable,
             { QStringLiteral("帧ID"), QStringLiteral("类型"), QStringLiteral("长度"),
               QStringLiteral("数据"), QStringLiteral("次数") }));
-        rv->addWidget(m_coRxTable, 1);
+        rv->addWidget(m_coRxTable, 2);
 
         m_coScrollTable = new QTableWidget(0, SC_COL_COUNT);
         m_coScrollTable->setObjectName("coScroll");
@@ -1035,7 +1215,7 @@ MainWindow::MainWindow(QWidget *parent)
         rv->addWidget(makeRxFilterRow(QStringLiteral("co.scroll"), m_coScrollTable,
             { QStringLiteral("方向"), QStringLiteral("帧ID"), QStringLiteral("类型"),
               QStringLiteral("长度"), QStringLiteral("数据") }));
-        rv->addWidget(m_coScrollTable, 1);
+        rv->addWidget(m_coScrollTable, 2);
 
         auto *crb = new QHBoxLayout;
         m_coClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
@@ -1043,6 +1223,9 @@ MainWindow::MainWindow(QWidget *parent)
         crb->addWidget(m_coClearRxBtn);
         crb->addStretch();
         rv->addLayout(crb);
+        { QPlainTextEdit *pe = nullptr;
+          rv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（CANopen）")), 1);
+          registerParseArea(QStringLiteral("canopen"), pe); }
         oroot->setContentsMargins(6, 6, 6, 6);
         oroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
 
@@ -1779,6 +1962,8 @@ void MainWindow::feedRx(const proto::RxFrame &f)
     appendScroll(QStringLiteral("RX"), f);            // 收一条
     applyRxFilter(m_rxTable);                         // 筛选随新行刷新
 }
+
+void MainWindow::simulateRx(const proto::RxFrame &f) { onFrameReceived(f); }
 
 int MainWindow::rxRowCount() const
 {
@@ -3507,9 +3692,16 @@ void MainWindow::setRxMode(bool scroll)
 
 void MainWindow::onFrameReceived(const proto::RxFrame &f)
 {
+    if (m_rxPaused) return;                           // 暂停接收：丢弃（含未完成帧）
     feedRx(f);                                        // 通用接收表就地更新 + 滚动回显
     simpleFeedRx(f);                                  // Simple 页接收区同步
     coFeedRx(f);                                      // CANopen(Open) 页接收区同步
+    cbFeedRx(f);                                      // CyberBeast 页接收区同步
+    // 解析区（4 个协议页，各按本协议解析）
+    appendParse(QStringLiteral("cyberbeast"), f);
+    appendParse(QStringLiteral("simple"), f);
+    appendParse(QStringLiteral("canopen"), f);
+    appendParse(QStringLiteral("rs485"), f);
 }
 
 void MainWindow::onResponseReceived(const proto::RxResponse &r)
@@ -3567,6 +3759,368 @@ void MainWindow::onLogMessage(const proto::LogMessage &m)
     else
         logError(t);
 }
+
+// ===========================================================================
+//  接收暂停（命令 11）与“解析区”
+// ===========================================================================
+QPushButton *MainWindow::makePauseButton()
+{
+    auto *b = new QPushButton(QStringLiteral("暂停接收"));
+    b->setObjectName(QStringLiteral("pauseRxBtn"));
+    b->setCheckable(true);
+    b->setToolTip(QStringLiteral("暂停/恢复接收：停止 CAN 收发中断并清空未完成帧（命令 11）"));
+    m_pauseBtns.append(b);
+    connect(b, &QPushButton::clicked, this, &MainWindow::onTogglePause);
+    return b;
+}
+
+void MainWindow::applyPauseUi()
+{
+    for (QPushButton *b : m_pauseBtns) {
+        if (!b) continue;
+        QSignalBlocker sb(b);
+        b->setChecked(m_rxPaused);
+        b->setText(m_rxPaused ? QStringLiteral("继续接收") : QStringLiteral("暂停接收"));
+    }
+}
+
+void MainWindow::registerParseArea(const QString &key, QPlainTextEdit *pe)
+{
+    if (!pe) return;
+    pe->setObjectName(QStringLiteral("parse_") + key);   // 便于自测定位
+    m_parseAreas.insert(key, pe);
+}
+
+void MainWindow::appendParse(const QString &key, const proto::RxFrame &f)
+{
+    QPlainTextEdit *pe = m_parseAreas.value(key, nullptr);
+    if (!pe) return;
+    QString line;
+    if (key == QLatin1String("cyberbeast"))   line = frameParse::cyberBeast(f);
+    else if (key == QLatin1String("simple"))  line = frameParse::simple(f);
+    else if (key == QLatin1String("canopen")) line = frameParse::canopen(f);
+    else if (key == QLatin1String("rs485"))   line = frameParse::rs485(f);
+    else                                      line = frameParse::generic(f);
+    pe->appendPlainText(line);
+}
+
+void MainWindow::onTogglePause()
+{
+    m_rxPaused = !m_rxPaused;
+    if (m_link && m_link->isOpen())
+        sendCommand(proto::CMD_SET_PAUSE, m_rxPaused ? 1u : 0u,
+                    m_rxPaused ? QStringLiteral("暂停接收") : QStringLiteral("恢复接收"));
+    // 暂停与恢复都丢弃本机未完成/半成品帧，避免恢复后出现坏数据
+    if (m_link) m_link->resetRxParser();
+    logInfo(m_rxPaused ? QStringLiteral("已暂停接收（CAN 收发中断停止，未完成帧已清空）")
+                       : QStringLiteral("已恢复接收"));
+    applyPauseUi();
+}
+
+// ===========================================================================
+//  CyberBeast 协议页（按类别下拉，仿 simple/open）
+// ===========================================================================
+namespace {
+struct CbCmdDef { int msg; const char *cat; const char *name; QStringList params; };
+
+const QVector<CbCmdDef> &cbDefs()
+{
+    static const QVector<CbCmdDef> v = {
+        // 实时控制（点对点）
+        {0x00, "ctrl",   "MIT_CONTROL 力位混合",   {"位置(rad)","速度(rad/s)","Kp","Kd","力矩(N·m)"}},
+        {0x01, "ctrl",   "POS_CONTROL 位置",       {"位置(°)","速度限值(RPM)","电流限值(A)"}},
+        {0x02, "ctrl",   "VEL_CONTROL 速度",       {"速度(RPM)","电流限值(A)"}},
+        {0x03, "ctrl",   "TORQUE_CONTROL 力矩",    {"力矩(N·m)"}},
+        {0x04, "ctrl",   "CURRENT_CONTROL 电流",   {"电流(A)"}},
+        // 配置管理
+        {0x20, "config", "PARAM_READ 参数读",      {"Endpoint(hex)","ReqLen(1..8)","Offset"}},
+        {0x21, "config", "PARAM_WRITE 参数写",     {"Endpoint(hex)","DataLen","Value(hex)"}},
+        {0x22, "config", "CONFIG_SAVE 保存配置",   {}},
+        {0x23, "config", "CONFIG_RESET 恢复出厂",  {}},
+        // 状态查询
+        {0x40, "query",  "QUERY_STATUS 综合状态",  {}},
+        {0x41, "query",  "QUERY_POS_VEL 位置速度", {}},
+        {0x42, "query",  "QUERY_CURRENT 电流",     {}},
+        {0x43, "query",  "QUERY_TEMPERATURE 温度", {}},
+        {0x44, "query",  "QUERY_BUS 母线电压电流", {}},
+        {0x45, "query",  "QUERY_ERROR 详细错误码", {"ErrorType(0=电机,1=编码器,3=控制器,4=系统,5=轴)"}},
+        {0x46, "query",  "QUERY_DEVICE_INFO 设备信息", {}},
+        {0x47, "query",  "QUERY_POWER 功率",       {}},
+        // 系统管理
+        {0x60, "system", "SET_NODE_ID 设节点ID",   {"NodeID"}},
+        {0x61, "system", "SET_ZERO 设零点",        {}},
+        {0x62, "system", "START_MOTOR 启动电机",   {}},
+        {0x63, "system", "STOP_MOTOR 停止电机",    {}},
+        {0x64, "system", "RESET_DEVICE 复位设备",  {}},
+        {0x65, "system", "CLEAR_ERRORS 清除故障",  {}},
+        // 广播 / 紧急
+        {0x80, "bcast",  "MIT_CONTROL_BCAST MIT广播", {"位置(rad)","速度(rad/s)","Kp","Kd","力矩(N·m)"}},
+        {0x81, "bcast",  "POS_CONTROL_BCAST 位置广播",{"位置(°)","速度限值(RPM)","电流限值(A)"}},
+        {0xC0, "bcast",  "ESTOP 紧急停止",         {}},
+    };
+    return v;
+}
+
+int cbPriority(int msg)
+{
+    if (msg == 0xC0) return 0;   // CRITICAL
+    if (msg < 0x20)  return 2;   // HIGH_CTRL
+    if (msg < 0x40)  return 4;   // CONFIG
+    if (msg < 0x60)  return 5;   // QUERY
+    if (msg < 0x80)  return 6;   // STATUS/系统
+    if (msg < 0xA0)  return 2;   // 广播控制
+    return 0;
+}
+
+QByteArray beF32(float f) { quint32 v; std::memcpy(&v, &f, 4);
+    QByteArray o; o.append(char((v>>24)&0xFF)).append(char((v>>16)&0xFF)).append(char((v>>8)&0xFF)).append(char(v&0xFF)); return o; }
+QByteArray beU16(quint16 v) { QByteArray o; o.append(char((v>>8)&0xFF)).append(char(v&0xFF)); return o; }
+QByteArray beI16(qint16 v) { return beU16((quint16)v); }
+QByteArray beU32(quint32 v) { QByteArray o; o.append(char((v>>24)&0xFF)).append(char((v>>16)&0xFF)).append(char((v>>8)&0xFF)).append(char(v&0xFF)); return o; }
+quint16 clampU(int v, int bits) { int hi = (1<<bits)-1; return (quint16)(v<0?0:(v>hi?hi:v)); }
+} // namespace
+
+void MainWindow::rebuildCbCommands()
+{
+    if (!m_cbCmdBox || !m_cbCatBox) return;
+    const QString cat = m_cbCatBox->currentData().toString();
+    QSignalBlocker b(m_cbCmdBox);
+    m_cbCmdBox->clear();
+    for (const CbCmdDef &c : cbDefs()) {
+        if (!cat.isEmpty() && QString::fromLatin1(c.cat) != cat) continue;
+        const QString hex = QString::number(c.msg, 16).toUpper().rightJustified(2, QLatin1Char('0'));
+        m_cbCmdBox->addItem(QStringLiteral("0x%1  %2").arg(hex).arg(QString::fromLatin1(c.name)), c.msg);
+    }
+    rebuildCbParams();
+}
+
+void MainWindow::rebuildCbParams()
+{
+    if (!m_cbParamArea) return;
+    if (auto *lay = m_cbParamArea->layout()) {
+        QLayoutItem *it;
+        while ((it = lay->takeAt(0)) != nullptr) {
+            if (it->widget()) delete it->widget();
+            delete it;
+        }
+        delete lay;
+    }
+    m_cbParamEdits.clear();
+    const int msg = m_cbCmdBox ? m_cbCmdBox->currentData().toInt() : -1;
+    const CbCmdDef *def = nullptr;
+    for (const CbCmdDef &c : cbDefs()) if (c.msg == msg) { def = &c; break; }
+    if (!def || def->params.isEmpty()) {
+        auto *l = new QVBoxLayout(m_cbParamArea);
+        l->addWidget(new QLabel(QStringLiteral("（该命令无需参数）")));
+        updateCbPreview();
+        return;
+    }
+    auto *g = new QGridLayout(m_cbParamArea);
+    for (int i = 0; i < def->params.size(); ++i) {
+        g->addWidget(new QLabel(def->params.at(i)), i, 0);
+        auto *e = new QLineEdit;
+        e->setObjectName(QStringLiteral("cbParam%1").arg(i));
+        connect(e, &QLineEdit::textChanged, this, [this]() { updateCbPreview(); });
+        g->addWidget(e, i, 1);
+        m_cbParamEdits.append(e);
+    }
+    // 合理默认值
+    auto setDef = [&](int i, const QString &t) { if (i < m_cbParamEdits.size()) m_cbParamEdits.at(i)->setText(t); };
+    switch (msg) {
+    case 0x00: case 0x80: for (int i=0;i<5;i++) setDef(i, "0"); break;
+    case 0x01: case 0x81: setDef(0,"0"); setDef(1,"0"); setDef(2,"0"); break;
+    case 0x02: setDef(0,"0"); setDef(1,"0"); break;
+    case 0x03: case 0x04: setDef(0,"0"); break;
+    case 0x20: setDef(0,"0x0000"); setDef(1,"4"); setDef(2,"0"); break;
+    case 0x21: setDef(0,"0x0000"); setDef(1,"4"); setDef(2,"00 00 00 00"); break;
+    case 0x45: setDef(0,"0"); break;
+    case 0x60: setDef(0,"1"); break;
+    default: break;
+    }
+    updateCbPreview();
+}
+
+QByteArray MainWindow::buildCbFrame(QString *err) const
+{
+    if (err) err->clear();
+    if (!m_cbCmdBox) { if (err) *err = QStringLiteral("未选择命令"); return QByteArray(); }
+    const int msg = m_cbCmdBox->currentData().toInt();
+    const int src = m_cbMasterEdit ? m_cbMasterEdit->text().toInt(nullptr, 0) : 1;
+    const int dst = m_cbDestEdit ? m_cbDestEdit->text().toInt(nullptr, 0) : 1;
+    if (src < 0 || src > 255)  { if (err) *err = QStringLiteral("源地址需 0..255"); return QByteArray(); }
+    if (dst < 0 || dst > 255)  { if (err) *err = QStringLiteral("目标/位掩码需 0..255"); return QByteArray(); }
+    const int pri = cbPriority(msg);
+
+    auto val = [&](int i) -> double {
+        return (i < m_cbParamEdits.size() && m_cbParamEdits.at(i))
+                   ? m_cbParamEdits.at(i)->text().toDouble() : 0.0; };
+    auto txt = [&](int i) -> QString {
+        return (i < m_cbParamEdits.size() && m_cbParamEdits.at(i))
+                   ? m_cbParamEdits.at(i)->text().trimmed() : QString(); };
+
+    QByteArray data;
+    switch (msg) {
+    case 0x00: case 0x80: {   // MIT 力位混合 8B（手册 4.1.1）
+        const double maxPos = 4.0 * M_PI, maxVel = 30.0, maxKp = 500.0, maxKd = 100.0, maxTq = 18.0;
+        const int pos = clampU((int)std::lround((val(0) + maxPos) / (2*maxPos) * 65535.0), 16);
+        const int vel = clampU((int)std::lround((val(1) + maxVel) / (2*maxVel) * 4095.0), 12);
+        const int kp  = clampU((int)std::lround( val(2) / maxKp * 4095.0), 12);
+        const int kd  = clampU((int)std::lround( val(3) / maxKd * 4095.0), 12);
+        const int tq  = clampU((int)std::lround((val(4) + maxTq) / (2*maxTq) * 4095.0), 12);
+        data.append(char((pos>>8)&0xFF)).append(char(pos&0xFF));
+        data.append(char((vel>>4)&0xFF));
+        data.append(char(((vel&0xF)<<4) | ((kp>>8)&0xF)));
+        data.append(char(kp&0xFF));
+        data.append(char((kd>>4)&0xFF));
+        data.append(char(((kd&0xF)<<4) | ((tq>>8)&0xF)));
+        data.append(char(tq&0xFF));
+        break; }
+    case 0x01: case 0x81: {   // POS_CONTROL（Classic 8B：float pos + int16 vel + int16 cur/0.1A）
+        data = beF32((float)val(0));
+        data += beI16((qint16)std::lround(val(1)));
+        data += beI16((qint16)std::lround(val(2) * 10.0));
+        break; }
+    case 0x02: data = beF32((float)val(0)) + beF32((float)val(1)); break;
+    case 0x03: case 0x04: data = beF32((float)val(0)); break;
+    case 0x20: {              // PARAM_READ 请求 8B
+        data.append(char(0));                                   // Flags
+        data += beU16((quint16)txt(0).toUInt(nullptr, 0));      // Endpoint
+        data.append(char((int)txt(1).toUInt()));                // ReqLen
+        data += beU32((quint32)txt(2).toUInt());                // Offset
+        break; }
+    case 0x21: {              // PARAM_WRITE 请求（≤4 字节单帧；>4 用分段写）
+        const QByteArray v = QByteArray::fromHex(txt(2).remove(QLatin1Char(' ')).toLatin1());
+        if (v.size() > 4) {
+            if (err) *err = QStringLiteral("单帧写 ≤4 字节；更大参数请用分段写（暂未实现）");
+            return QByteArray();
+        }
+        data.append(char(0));                                   // Flags
+        data += beU16((quint16)txt(0).toUInt(nullptr, 0));      // Endpoint
+        data.append(char(v.size()));                            // DataLen
+        data += v;
+        break; }
+    case 0x45: data.append(char((int)txt(0).toUInt())); break;  // QUERY_ERROR：ErrorType
+    case 0x60: data = beU32((quint32)txt(0).toUInt(nullptr, 0)); break;  // SET_NODE_ID
+    default: break;           // 无 payload
+    }
+
+    if (data.size() > 64) { if (err) *err = QStringLiteral("数据超过 64 字节"); return QByteArray(); }
+
+    static quint32 s_seq = 0;
+    const quint32 id = ((quint32)(pri & 7) << 26) | ((quint32)(msg & 0xFF) << 18) |
+                       ((quint32)(dst & 0xFF) << 10) | ((quint32)(src & 0xFF) << 2) | (s_seq++ & 0x3);
+    const int dlc = proto::bytesToDlc(data.size());
+    if (dlc < 0) { if (err) *err = QStringLiteral("DLC 无效"); return QByteArray(); }
+    return proto::buildDataFrame(id, /*ext*/true, /*fd*/false, /*brs*/false, /*rtr*/false, dlc, data);
+}
+
+void MainWindow::updateCbPreview()
+{
+    if (!m_cbPreview) return;
+    QString err;
+    const QByteArray f = buildCbFrame(&err);
+    if (f.isEmpty()) { m_cbPreview->setText(err.isEmpty() ? QStringLiteral("（无效）") : err); return; }
+    proto::RxFrame rx;
+    if (proto::decodeDataFrame(f, &rx)) {
+        const QString idHex = QString::number(rx.id, 16).toUpper().rightJustified(8, QLatin1Char('0'));
+        m_cbPreview->setText(QStringLiteral("ID=0x%1  数据=%2")
+            .arg(idHex, QString::fromLatin1(rx.data.toHex(' ').toUpper())));
+    } else {
+        m_cbPreview->setText(QStringLiteral("（无法构建）"));
+    }
+}
+
+void MainWindow::onCbCatChanged(int)
+{
+    rebuildCbCommands();
+    updateCbPreview();
+}
+
+void MainWindow::onCbCmdChanged(int)
+{
+    rebuildCbParams();
+    updateCbPreview();
+}
+
+void MainWindow::onCbSend()
+{
+    if (!m_link || !m_link->isOpen()) { logWarn(QStringLiteral("串口未打开。")); return; }
+    QString err;
+    const QByteArray f = buildCbFrame(&err);
+    if (f.isEmpty()) { logWarn(QStringLiteral("无法发送：%1").arg(err)); return; }
+    sendCachedFrames(false, QVector<QByteArray>{ f }, 0u);
+    flushTx(QStringLiteral("CyberBeast 发送"));
+    proto::RxFrame rx;
+    if (proto::decodeDataFrame(f, &rx)) cbAppendScroll(QStringLiteral("TX"), rx);
+    logInfo(QStringLiteral("已发送 %1").arg(m_cbCmdBox ? m_cbCmdBox->currentText() : QString()));
+}
+
+void MainWindow::onCbStop()
+{
+    if (!m_link || !m_link->isOpen()) return;
+    sendCommand(proto::CMD_TX_STOP, 0, QStringLiteral("停止发送"));
+}
+
+void MainWindow::cbFeedRx(const proto::RxFrame &f)
+{
+    if (!m_cbRxTable) return;
+    int row = m_cbRxRowById.value(f.id, -1);
+    if (row < 0) {
+        row = m_cbRxTable->rowCount();
+        m_cbRxTable->insertRow(row);
+        for (int c = 0; c < RX_COL_COUNT; c++) {
+            auto *it = new QTableWidgetItem;
+            it->setFlags(Qt::ItemIsEnabled);
+            m_cbRxTable->setItem(row, c, it);
+        }
+        m_cbRxRowById.insert(f.id, row);
+    }
+    const int count = m_cbRxTable->item(row, RX_COUNT)->text().toInt() + 1;
+    m_cbRxTable->item(row, RX_ID)->setText(
+        QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+    m_cbRxTable->item(row, RX_TYPE)->setText(rxTypeText(f));
+    m_cbRxTable->item(row, RX_LEN)->setText(QString::number(f.data.size()));
+    m_cbRxTable->item(row, RX_DATA)->setText(QString::fromLatin1(f.data.toHex(' ').toUpper()));
+    m_cbRxTable->item(row, RX_COUNT)->setText(QString::number(count));
+    cbAppendScroll(QStringLiteral("RX"), f);
+    applyRxFilter(m_cbRxTable);
+}
+
+void MainWindow::cbAppendScroll(const QString &dir, const proto::RxFrame &f)
+{
+    if (!m_cbScrollTable || !m_cbScrollMode) return;
+    QScrollBar *vsb = m_cbScrollTable->verticalScrollBar();
+    const bool follow = (vsb->value() >= vsb->maximum());
+    const int row = m_cbScrollTable->rowCount();
+    m_cbScrollTable->insertRow(row);
+    QString dirTxt = dir;
+    if (m_cbTsBox && m_cbTsBox->isChecked())
+        dirTxt = QStringLiteral("%1 %2").arg(QTime::currentTime().toString("HH:mm:ss.zzz"), dir);
+    auto set = [&](int c, const QString &t) {
+        auto *it = new QTableWidgetItem(t);
+        it->setFlags(Qt::ItemIsEnabled);
+        m_cbScrollTable->setItem(row, c, it);
+    };
+    set(SC_DIR, dirTxt);
+    set(SC_ID, QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+    set(SC_TYPE, rxTypeText(f));
+    set(SC_LEN, QString::number(f.data.size()));
+    set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
+    if (m_cbScrollTable->rowCount() > 5000) m_cbScrollTable->removeRow(0);
+    applyRxFilter(m_cbScrollTable);
+    if (follow) m_cbScrollTable->scrollToBottom();
+}
+
+void MainWindow::cbSetRxMode(bool scroll)
+{
+    m_cbScrollMode = scroll;
+    if (m_cbRxTable) m_cbRxTable->setVisible(!scroll);
+    if (m_cbScrollTable) m_cbScrollTable->setVisible(scroll);
+    if (QWidget *r = filterRowFor(m_cbRxTable)) r->setVisible(!scroll);
+    if (QWidget *r = filterRowFor(m_cbScrollTable)) r->setVisible(scroll);
+    if (m_cbModeLbl) m_cbModeLbl->setText(scroll ? QStringLiteral("滚动") : QStringLiteral("就地"));
+}
+
 
 QString MainWindow::scrollText() const
 {
@@ -3680,6 +4234,16 @@ void MainWindow::saveSettings()
             st.setValue(QStringLiteral("co/listF%1_%2").arg(i).arg(j),
                         QString::fromLatin1(m_coListModel.at(i).frames.at(j).toHex()));
     }
+    // CyberBeast 协议页
+    if (m_cbMasterEdit) st.setValue("cb/master", m_cbMasterEdit->text());
+    if (m_cbDestEdit)   st.setValue("cb/dest", m_cbDestEdit->text());
+    if (m_cbCatBox)     st.setValue("cb/cat", m_cbCatBox->currentData().toString());
+    if (m_cbCmdBox)     st.setValue("cb/cmd", m_cbCmdBox->currentData().toInt());
+    st.setValue("cb/nparam", m_cbParamEdits.size());
+    for (int i = 0; i < m_cbParamEdits.size(); ++i)
+        st.setValue(QStringLiteral("cb/param%1").arg(i),
+                    m_cbParamEdits.at(i) ? m_cbParamEdits.at(i)->text() : QString());
+    st.setValue("cb/scroll", m_cbScrollMode);
     // RS485 数据区
     if (m_rs485DataEdit)  st.setValue("rs485/data", m_rs485DataEdit->text());
     // 接收区筛选框文本（各页）
@@ -3773,6 +4337,28 @@ void MainWindow::loadSettings()
         }
         syncConnUi();          // 端口选择广播到所有页面的连接区
     }
+    // CyberBeast 协议页
+    if (m_cbMasterEdit) m_cbMasterEdit->setText(st.value("cb/master", "1").toString());
+    if (m_cbDestEdit)   m_cbDestEdit->setText(st.value("cb/dest", "1").toString());
+    if (m_cbCatBox) {
+        const QString cat = st.value("cb/cat", "ctrl").toString();
+        int ci = m_cbCatBox->findData(cat);
+        if (ci >= 0) { QSignalBlocker b(m_cbCatBox); m_cbCatBox->setCurrentIndex(ci); }
+        rebuildCbCommands();
+    }
+    if (m_cbCmdBox) {
+        const int cmd = st.value("cb/cmd", 0).toInt();
+        int idx = m_cbCmdBox->findData(cmd);
+        if (idx >= 0) { QSignalBlocker b(m_cbCmdBox); m_cbCmdBox->setCurrentIndex(idx); }
+        rebuildCbParams();
+    }
+    {
+        const int n = st.value("cb/nparam", 0).toInt();
+        for (int i = 0; i < m_cbParamEdits.size() && i < n; ++i)
+            if (m_cbParamEdits.at(i))
+                m_cbParamEdits.at(i)->setText(st.value(QStringLiteral("cb/param%1").arg(i)).toString());
+    }
+    cbSetRxMode(st.value("cb/scroll", false).toBool());
     if (m_rs485DataEdit)
         m_rs485DataEdit->setText(st.value("rs485/data", QString()).toString());
     // 接收区选项

@@ -181,6 +181,16 @@ void can_tx_data(const FDCAN_TxHeaderType *hdr, const uint8_t *data);
 int32_t can_tx_start(can_tx_trigger_t trigger);
 // Abort any running TX job (stops the periodic pump).
 void can_tx_stop(void);
+
+// ---- Reception pause (host "stop accepting") ----
+// paused=1: stop both the CAN TX job/timer and the FDCAN reception
+//           interrupts, and flush the software RX queue so no complete/
+//           partial frame survives into the resumed session.
+// paused=0: discard stale hardware RX frames, flush the queue, re-arm the
+//           reception interrupts.
+// While paused the bus stays configured; only accepting/transmitting stops.
+void can_set_pause(uint8_t paused);
+uint8_t can_get_pause(void);
 // Frames dropped because the TX pending list was full (oldest overwritten).
 uint32_t can_tx_drop_count(void);
 // Format a one-line ASCII status report (host GET_STATUS command).

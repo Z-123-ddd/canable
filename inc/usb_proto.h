@@ -74,6 +74,12 @@
 //   id 10: query the firmware version. The MCU replies with an ASCII string
 //          (GIT_VERSION): AA AC 02 | LEN(1) | TEXT(LEN).
 #define USB_PROTO_CMD_ID_GET_VERSION  10
+//   id 11: pause/resume reception. value = 1 pause / 0 resume; other
+//          values are refused (ERR_USB_BADFRAME). While paused the CAN
+//          transmit job/timer and the FDCAN reception interrupts stop, and
+//          the software RX queue is flushed so no partially/fully received
+//          frame survives into the resumed session.
+#define USB_PROTO_CMD_ID_SET_PAUSE    11
 
 // Allowed range (ms) for the SET_INTERVAL command value.
 #define USB_PROTO_TX_INTERVAL_MIN_MS  1U

@@ -277,6 +277,15 @@ static void proto_cmd_dispatch(void)
             usb_proto_send_version(GIT_VERSION);
             break;
 
+        case USB_PROTO_CMD_ID_SET_PAUSE:
+            // value = 1 pause / 0 resume. Stops CAN TX + reception
+            // interrupts and flushes the RX queue; other values refused.
+            if (value <= 1u)
+                can_set_pause((uint8_t)value);
+            else
+                error_assert(ERR_USB_BADFRAME);
+            break;
+
         default:
             error_assert(ERR_USB_BADFRAME);
             break;

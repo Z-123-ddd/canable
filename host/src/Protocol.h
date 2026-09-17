@@ -51,6 +51,7 @@ enum Cmd : uint8_t {
     CMD_SET_DATA_BITRATE = 8,  // value = CAN FD 数据域波特率(Hz): 2000000/5000000
     CMD_SET_WORK_MODE    = 9,  // value: 0=CAN 1=RS485（切换调试器工作模式）
     CMD_GET_VERSION      = 10, // 查询固件版本（回 AA AC RSP_VERSION）
+    CMD_SET_PAUSE        = 11, // value: 1=暂停接收（停 CAN 收发中断+清未完成帧） 0=恢复
 };
 
 // 发送模式
