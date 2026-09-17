@@ -15,6 +15,7 @@
 #include "Protocol.h"
 
 class SerialLink;
+class EtherCatLink;
 class UsbLink;
 class Link;
 class QComboBox;
@@ -211,7 +212,15 @@ private:
     void         syncConnUi();          // 把第 0 份（规范）的传输/端口/按钮状态广播到所有副本
     void         onTransportChanged(int panelIdx);
     void         onPortChanged(int panelIdx);
-    void setWorkMode(int mode);     // 模式菜单：切页面（CAN=0/RS485=1）+ 命令 9
+    void setWorkMode(int mode);     // 模式菜单：切页面（CAN=0/RS485=1/EtherCAT=2）
+    // ---- EtherCAT（主站，SOEM）----
+    void onEcRefreshAdapters();     // 扫描主机网卡
+    void onEcOpenToggle();          // 打开/关闭所选网卡
+    void onEcScanSlaves();          // 扫描从站（ecx_config_init）
+    void onEcMap();                 // 映射过程数据（ecx_config_map_group）
+    void onEcRunToggle();           // 启动/停止周期过程数据（定时器）
+    void onEcSdoRead();             // CoE SDO 读
+    void onEcSdoWrite();            // CoE SDO 写
     // ---- Simple 协议页 ----
     void rebuildSimpleParams();                        // 按当前命令重建参数输入框
     void updateSimplePreview();                        // 刷新预览（CAN ID / 数据 hex）
@@ -235,6 +244,25 @@ private:
     SerialLink *m_serial = nullptr;
     UsbLink    *m_usb = nullptr;
     Link       *m_link = nullptr;    // 当前活动传输（串口或 USB）
+    EtherCatLink *m_ethercat = nullptr;  // EtherCAT 主站（SOEM，独立于 AA AA 协议）
+    // ---- EtherCAT 页控件 ----
+    QComboBox   *m_ecAdapterBox = nullptr;   // 网卡(适配器)下拉
+    QPushButton *m_ecRefreshBtn = nullptr;
+    QPushButton *m_ecOpenBtn = nullptr;
+    QLabel      *m_ecStatusLbl = nullptr;
+    QPushButton *m_ecScanBtn = nullptr;
+    QTableWidget *m_ecSlaveTable = nullptr;
+    QPushButton *m_ecMapBtn = nullptr;
+    QPushButton *m_ecRunBtn = nullptr;
+    QLabel      *m_ecWkcLbl = nullptr;
+    QSpinBox    *m_ecSlaveSpin = nullptr;     // CoE：从站号
+    QLineEdit   *m_ecIndexEdit = nullptr;     // CoE：索引(hex)
+    QLineEdit   *m_ecSubEdit = nullptr;       // CoE：子索引
+    QLineEdit   *m_ecValEdit = nullptr;       // CoE：值(hex)
+    QPushButton *m_ecSdoReadBtn = nullptr;
+    QPushButton *m_ecSdoWriteBtn = nullptr;
+    QLabel      *m_ecSdoResultLbl = nullptr;
+    QTimer      *m_ecTimer = nullptr;         // 周期过程数据
 
     // 串口/USB 传输选择
     QComboBox *m_transportBox = nullptr;
@@ -298,9 +326,10 @@ private:
     QVector<LogPanel>  m_logPanels;    // 各页面的日志区（[0] 为规范/通用CAN）
 
     // 模式页面（顶部菜单「模式」切换）
-    QStackedWidget *m_modeStack = nullptr;   // 0=CAN, 1=RS485
+    QStackedWidget *m_modeStack = nullptr;   // 0=CAN, 1=RS485, 2=EtherCAT
     QWidget *m_pageCan = nullptr;
     QWidget *m_pageRs485 = nullptr;
+    QWidget *m_pageEtherCat = nullptr;
     // RS485 页：数据区 + 接收区（布局与通用CAN一致）
     QLineEdit    *m_rs485DataEdit = nullptr;   // 数据区：待发送数据(hex)
     QPushButton  *m_rs485SendBtn = nullptr;
@@ -314,6 +343,7 @@ private:
     bool          m_rs485ScrollMode = false;
     QAction *m_actionModeCan = nullptr;
     QAction *m_actionModeRs485 = nullptr;
+    QAction *m_actionModeEtherCat = nullptr;
 
     // 协议调试页（CAN 页内）：协议菜单切换（CyberBeast / Simple / Open）
     QStackedWidget *m_protoStack = nullptr;

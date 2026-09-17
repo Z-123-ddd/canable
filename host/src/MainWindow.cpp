@@ -7,6 +7,7 @@
 #include "SimpleProto.h"
 #include "HexFormat.h"
 #include "CanOpenProto.h"
+#include "EtherCatLink.h"
 #include "ObjectDictionaryDialog.h"
 
 #include <QWidget>
@@ -184,6 +185,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_serial = new SerialLink(this);
     m_usb    = new UsbLink(this);
+    m_ethercat = new EtherCatLink(this);
     m_link   = m_serial;                 // 默认串口
     for (Link *lk : { (Link *)m_serial, (Link *)m_usb }) {
         connect(lk, &Link::opened,             this, &MainWindow::onPortOpened);
@@ -457,6 +459,10 @@ MainWindow::MainWindow(QWidget *parent)
     m_actionModeRs485->setObjectName("actionModeRs485");
     m_actionModeRs485->setCheckable(true);
     modeGroup->addAction(m_actionModeRs485);
+    m_actionModeEtherCat = modeMenu->addAction(QStringLiteral("EtherCAT"));
+    m_actionModeEtherCat->setObjectName("actionModeEtherCat");
+    m_actionModeEtherCat->setCheckable(true);
+    modeGroup->addAction(m_actionModeEtherCat);
 
     auto *helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
     helpMenu->setObjectName("menuHelp");
@@ -595,6 +601,133 @@ MainWindow::MainWindow(QWidget *parent)
         rsroot->setContentsMargins(6, 6, 6, 6);
         rsroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
     }
+    // ---------------- EtherCAT 页（SOEM 主站；独立于串口/USB 收发）----------------
+    m_pageEtherCat = new QWidget;
+    m_pageEtherCat->setObjectName("pageEtherCat");
+    {
+        auto *ecroot = new QHBoxLayout(m_pageEtherCat);
+
+        auto *lcol = new QWidget;
+        auto *lcl = new QVBoxLayout(lcol);
+
+        // ---- 连接（网卡）----
+        auto *cBox = new QGroupBox(QStringLiteral("连接（EtherCAT 主站 / 网卡）"));
+        auto *cv = new QVBoxLayout(cBox);
+        auto *cr1 = new QHBoxLayout;
+        cr1->addWidget(new QLabel(QStringLiteral("网卡:")));
+        m_ecAdapterBox = new QComboBox;
+        m_ecAdapterBox->setObjectName("ecAdapterBox");
+        m_ecAdapterBox->setMinimumWidth(320);
+        cr1->addWidget(m_ecAdapterBox, 1);
+        m_ecRefreshBtn = new QPushButton(QStringLiteral("刷新"));
+        m_ecRefreshBtn->setObjectName("ecRefreshBtn");
+        cr1->addWidget(m_ecRefreshBtn);
+        m_ecOpenBtn = new QPushButton(QStringLiteral("打开"));
+        m_ecOpenBtn->setObjectName("ecOpenBtn");
+        cr1->addWidget(m_ecOpenBtn);
+        cv->addLayout(cr1);
+        m_ecStatusLbl = new QLabel(QStringLiteral("未连接"));
+        m_ecStatusLbl->setObjectName("ecStatusLbl");
+        cv->addWidget(m_ecStatusLbl);
+        lcl->addWidget(cBox);
+
+        // ---- 从站 ----
+        auto *sBox = new QGroupBox(QStringLiteral("从站"));
+        auto *sv = new QVBoxLayout(sBox);
+        auto *sr = new QHBoxLayout;
+        m_ecScanBtn = new QPushButton(QStringLiteral("扫描从站"));
+        m_ecScanBtn->setObjectName("ecScanBtn");
+        sr->addWidget(m_ecScanBtn);
+        sr->addStretch();
+        sv->addLayout(sr);
+        m_ecSlaveTable = new QTableWidget(0, 7);
+        m_ecSlaveTable->setObjectName("ecSlaveTable");
+        m_ecSlaveTable->setHorizontalHeaderLabels({
+            QStringLiteral("位置"), QStringLiteral("名称"), QStringLiteral("状态"),
+            QStringLiteral("AL状态码"), QStringLiteral("配置地址"),
+            QStringLiteral("Vendor"), QStringLiteral("Product")});
+        m_ecSlaveTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        for (int c : {0, 2, 3, 4, 5, 6})
+            m_ecSlaveTable->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
+        m_ecSlaveTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_ecSlaveTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_ecSlaveTable->verticalHeader()->setVisible(false);
+        m_ecSlaveTable->setMinimumHeight(160);
+        sv->addWidget(m_ecSlaveTable, 1);
+        lcl->addWidget(sBox, 1);
+
+        // ---- 过程数据 ----
+        auto *pBox = new QGroupBox(QStringLiteral("过程数据 (Process Data)"));
+        auto *pv = new QVBoxLayout(pBox);
+        auto *pr = new QHBoxLayout;
+        m_ecMapBtn = new QPushButton(QStringLiteral("映射 (config_map)"));
+        m_ecMapBtn->setObjectName("ecMapBtn");
+        m_ecRunBtn = new QPushButton(QStringLiteral("启动周期"));
+        m_ecRunBtn->setObjectName("ecRunBtn");
+        m_ecWkcLbl = new QLabel(QStringLiteral("WKC: -"));
+        m_ecWkcLbl->setObjectName("ecWkcLbl");
+        pr->addWidget(m_ecMapBtn);
+        pr->addWidget(m_ecRunBtn);
+        pr->addSpacing(12);
+        pr->addWidget(m_ecWkcLbl);
+        pr->addStretch();
+        pv->addLayout(pr);
+        lcl->addWidget(pBox);
+
+        // ---- CoE (SDO) ----
+        auto *oBox = new QGroupBox(QStringLiteral("CoE (SDO 读写)"));
+        auto *og = new QGridLayout(oBox);
+        og->addWidget(new QLabel(QStringLiteral("从站:")), 0, 0);
+        m_ecSlaveSpin = new QSpinBox;
+        m_ecSlaveSpin->setObjectName("ecSlaveSpin");
+        m_ecSlaveSpin->setRange(1, 200);
+        og->addWidget(m_ecSlaveSpin, 0, 1);
+        og->addWidget(new QLabel(QStringLiteral("索引(hex):")), 0, 2);
+        m_ecIndexEdit = new QLineEdit(QStringLiteral("0x6040"));
+        m_ecIndexEdit->setObjectName("ecIndexEdit");
+        og->addWidget(m_ecIndexEdit, 0, 3);
+        og->addWidget(new QLabel(QStringLiteral("子索引:")), 0, 4);
+        m_ecSubEdit = new QLineEdit(QStringLiteral("0"));
+        m_ecSubEdit->setObjectName("ecSubEdit");
+        og->addWidget(m_ecSubEdit, 0, 5);
+        og->addWidget(new QLabel(QStringLiteral("值(hex):")), 1, 0);
+        m_ecValEdit = new QLineEdit;
+        m_ecValEdit->setObjectName("ecValEdit");
+        m_ecValEdit->setPlaceholderText(QStringLiteral("写：如 06 00（小端）"));
+        og->addWidget(m_ecValEdit, 1, 1, 1, 5);
+        auto *ob = new QHBoxLayout;
+        m_ecSdoReadBtn = new QPushButton(QStringLiteral("读 SDO"));
+        m_ecSdoReadBtn->setObjectName("ecSdoReadBtn");
+        m_ecSdoWriteBtn = new QPushButton(QStringLiteral("写 SDO"));
+        m_ecSdoWriteBtn->setObjectName("ecSdoWriteBtn");
+        ob->addWidget(m_ecSdoReadBtn);
+        ob->addWidget(m_ecSdoWriteBtn);
+        ob->addStretch();
+        og->addLayout(ob, 2, 0, 1, 6);
+        m_ecSdoResultLbl = new QLabel;
+        m_ecSdoResultLbl->setObjectName("ecSdoResultLbl");
+        og->addWidget(m_ecSdoResultLbl, 3, 0, 1, 6);
+        lcl->addWidget(oBox);
+
+        lcl->addWidget(buildLogGroup(), 1);
+        ecroot->addWidget(lcol, 3);
+
+        // 右列：说明
+        auto *rcol = new QGroupBox(QStringLiteral("说明"));
+        auto *rv = new QVBoxLayout(rcol);
+        auto *hint = new QLabel(
+            QStringLiteral("EtherCAT 主站（内嵌 SOEM）。\n"
+                           "1) 「刷新」扫描主机网卡；选择后「打开」。\n"
+                           "2) 「扫描从站」枚举从站；「映射」后「启动周期」收发过程数据（显示 WKC）。\n"
+                           "3) 可用 CoE(SDO) 读写对象字典。\n\n"
+                           "运行需安装 Npcap（WinPcap-API 兼容模式）。"));
+        hint->setWordWrap(true);
+        hint->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        rv->addWidget(hint);
+        rv->addStretch();
+        ecroot->addWidget(rcol, 1);
+    }
+
     // ---------------- 协议调试页栈（CAN 页内：CyberBeast / Simple / Open / 通用CAN）----------------
     m_pageProtoCyberBeast = new QWidget;
     m_pageProtoCyberBeast->setObjectName("pageProtoCyberBeast");
@@ -933,6 +1066,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_modeStack->setObjectName("modeStack");
     m_modeStack->addWidget(pageCan);        // index 0 = CAN
     m_modeStack->addWidget(m_pageRs485);    // index 1 = RS485
+    m_modeStack->addWidget(m_pageEtherCat); // index 2 = EtherCAT
     setCentralWidget(m_modeStack);
     fitWindowToScreen(this);
 
@@ -962,6 +1096,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_actionProtoGeneric,    &QAction::triggered, this, [this]() { setProtocol(3); });
     connect(m_actionModeCan,   &QAction::triggered, this, [this]() { setWorkMode(0); });
     connect(m_actionModeRs485, &QAction::triggered, this, [this]() { setWorkMode(1); });
+    connect(m_actionModeEtherCat, &QAction::triggered, this, [this]() { setWorkMode(2); });
     connect(aboutAction,       &QAction::triggered, this, &MainWindow::onAbout);
 
     // Simple 协议页
@@ -1044,6 +1179,23 @@ MainWindow::MainWindow(QWidget *parent)
                                                      ? QStringLiteral("滚动") : QStringLiteral("就地"));
     });
     if (m_rs485ModeLbl) m_rs485ModeLbl->setText(QStringLiteral("就地"));
+
+    // EtherCAT 页
+    connect(m_ecRefreshBtn, &QPushButton::clicked, this, &MainWindow::onEcRefreshAdapters);
+    connect(m_ecOpenBtn,    &QPushButton::clicked, this, &MainWindow::onEcOpenToggle);
+    connect(m_ecScanBtn,    &QPushButton::clicked, this, &MainWindow::onEcScanSlaves);
+    connect(m_ecMapBtn,     &QPushButton::clicked, this, &MainWindow::onEcMap);
+    connect(m_ecRunBtn,     &QPushButton::clicked, this, &MainWindow::onEcRunToggle);
+    connect(m_ecSdoReadBtn, &QPushButton::clicked, this, &MainWindow::onEcSdoRead);
+    connect(m_ecSdoWriteBtn,&QPushButton::clicked, this, &MainWindow::onEcSdoWrite);
+    m_ecTimer = new QTimer(this);
+    connect(m_ecTimer, &QTimer::timeout, this, [this]() {
+        if (!m_ethercat || !m_ethercat->isOpen()) return;
+        m_ethercat->sendProcessData();
+        const int wkc = m_ethercat->receiveProcessData(2000);
+        if (m_ecWkcLbl)
+            m_ecWkcLbl->setText(QStringLiteral("WKC: %1 / 期望 %2").arg(wkc).arg(m_ethercat->expectedWkc()));
+    });
 
     // 空格键：发送发送列表中光标所在行（忽略勾选）
     if (m_table) m_table->installEventFilter(this);
@@ -1805,17 +1957,157 @@ void MainWindow::onQueryStatus()
 }
 
 // 工作模式切换（模式菜单）：切页面 + 连接时发命令 9
+// ---- EtherCAT 页（SOEM 主站）----
+void MainWindow::onEcRefreshAdapters()
+{
+    if (!m_ecAdapterBox) return;
+    m_ecAdapterBox->clear();
+    if (!EtherCatLink::captureAvailable()) {
+        logWarn(QStringLiteral("未检测到抓包驱动（wpcap.dll/Packet.dll）。请安装 Npcap（WinPcap 兼容模式）后重试。"));
+        if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("未检测到 Npcap（抓包驱动）"));
+        return;
+    }
+    const QVector<EcAdapterInfo> list = EtherCatLink::scanAdapters();
+    for (const EcAdapterInfo &a : list)
+        m_ecAdapterBox->addItem(a.desc.isEmpty() ? a.name : a.desc, a.name);
+    logInfo(QStringLiteral("发现 %1 个网卡适配器。").arg(list.size()));
+    if (m_ecStatusLbl)
+        m_ecStatusLbl->setText(list.isEmpty() ? QStringLiteral("未发现网卡")
+                                              : QStringLiteral("发现 %1 个网卡").arg(list.size()));
+}
+
+void MainWindow::onEcSdoRead()
+{
+    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
+    const int slave = m_ecSlaveSpin->value();
+    const quint16 index = (quint16)m_ecIndexEdit->text().toUInt(nullptr, 0);
+    const quint8 sub = (quint8)m_ecSubEdit->text().toUInt(nullptr, 0);
+    QByteArray data; QString err;
+    if (!m_ethercat->sdoRead(slave, index, sub, &data, &err)) {
+        if (m_ecSdoResultLbl) m_ecSdoResultLbl->setText(QStringLiteral("读失败：%1").arg(err));
+        logError(QStringLiteral("EtherCAT SDO 读失败：%1").arg(err));
+        return;
+    }
+    const QString hex = QString::fromLatin1(data.toHex(' ').toUpper());
+    if (m_ecSdoResultLbl)
+        m_ecSdoResultLbl->setText(QStringLiteral("读 0x%1:%2 (%3B) = %4")
+                                      .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(data.size()).arg(hex));
+    logInfo(QStringLiteral("EtherCAT SDO 读 0x%1:%2 = %3")
+                .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
+}
+
+void MainWindow::onEcSdoWrite()
+{
+    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
+    const int slave = m_ecSlaveSpin->value();
+    const quint16 index = (quint16)m_ecIndexEdit->text().toUInt(nullptr, 0);
+    const quint8 sub = (quint8)m_ecSubEdit->text().toUInt(nullptr, 0);
+    const QByteArray data = QByteArray::fromHex(m_ecValEdit->text().toLatin1());
+    QString err;
+    if (!m_ethercat->sdoWrite(slave, index, sub, data, &err)) {
+        if (m_ecSdoResultLbl) m_ecSdoResultLbl->setText(QStringLiteral("写失败：%1").arg(err));
+        logError(QStringLiteral("EtherCAT SDO 写失败：%1").arg(err));
+        return;
+    }
+    const QString hex = QString::fromLatin1(data.toHex(' ').toUpper());
+    if (m_ecSdoResultLbl)
+        m_ecSdoResultLbl->setText(QStringLiteral("写 0x%1:%2 = %3 成功")
+                                      .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
+    logInfo(QStringLiteral("EtherCAT SDO 写 0x%1:%2 = %3 成功")
+                .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
+}
+
+void MainWindow::onEcScanSlaves()
+{
+    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
+    const int n = m_ethercat->scanSlaves();
+    if (m_ecSlaveTable) {
+        m_ecSlaveTable->setRowCount(0);
+        for (int i = 1; i <= n; ++i) {
+            const EcSlaveInfo s = m_ethercat->slave(i);
+            const int r = m_ecSlaveTable->rowCount();
+            m_ecSlaveTable->insertRow(r);
+            auto set = [&](int c, const QString &t) {
+                auto *it = new QTableWidgetItem(t);
+                it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+                m_ecSlaveTable->setItem(r, c, it);
+            };
+            set(0, QString::number(s.pos));
+            set(1, s.name);
+            set(2, EtherCatLink::stateName(s.state));
+            set(3, QStringLiteral("0x%1").arg(s.alStatus, 4, 16, QLatin1Char('0')).toUpper());
+            set(4, QStringLiteral("0x%1").arg(s.configAddr, 4, 16, QLatin1Char('0')).toUpper());
+            set(5, QStringLiteral("0x%1").arg(s.vendorId, 8, 16, QLatin1Char('0')).toUpper());
+            set(6, QStringLiteral("0x%1").arg(s.productId, 8, 16, QLatin1Char('0')).toUpper());
+        }
+    }
+    logInfo(QStringLiteral("EtherCAT：发现 %1 个从站。").arg(n));
+}
+
+void MainWindow::onEcMap()
+{
+    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
+    if (!m_ethercat->mapProcessData()) { logWarn(QStringLiteral("映射失败（请先扫描从站）。")); return; }
+    logInfo(QStringLiteral("EtherCAT：过程数据已映射，IOmap %1 字节，期望 WKC=%2。")
+                .arg(m_ethercat->ioMap().size()).arg(m_ethercat->expectedWkc()));
+}
+
+void MainWindow::onEcRunToggle()
+{
+    if (!m_ecTimer || !m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
+    if (m_ecTimer->isActive()) {
+        m_ecTimer->stop();
+        m_ecRunBtn->setText(QStringLiteral("启动周期"));
+        logInfo(QStringLiteral("EtherCAT：已停止周期过程数据。"));
+    } else {
+        m_ecTimer->start(5);
+        m_ecRunBtn->setText(QStringLiteral("停止周期"));
+        logInfo(QStringLiteral("EtherCAT：已启动周期过程数据（5ms）。"));
+    }
+}
+
+void MainWindow::onEcOpenToggle()
+{
+    if (!m_ethercat) return;
+    if (m_ethercat->isOpen()) {
+        if (m_ecTimer) m_ecTimer->stop();
+        if (m_ecRunBtn) m_ecRunBtn->setText(QStringLiteral("启动周期"));
+        m_ethercat->close();
+        m_ecOpenBtn->setText(QStringLiteral("打开"));
+        if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("未连接"));
+        logInfo(QStringLiteral("EtherCAT：已关闭。"));
+        return;
+    }
+    if (m_ecAdapterBox->currentIndex() < 0) {
+        logWarn(QStringLiteral("请先选择网卡（点「刷新」扫描）。"));
+        return;
+    }
+    const QString name = m_ecAdapterBox->currentData().toString();
+    if (!m_ethercat->open(name)) {
+        if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("打开失败"));
+        return;
+    }
+    m_ecOpenBtn->setText(QStringLiteral("关闭"));
+    if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("已打开：%1").arg(m_ecAdapterBox->currentText()));
+    logInfo(QStringLiteral("EtherCAT：已打开网卡 %1。").arg(m_ecAdapterBox->currentText()));
+}
+
 void MainWindow::setWorkMode(int mode)
 {
-    const bool rs485 = (mode == 1);
-    if (m_modeStack)
-        m_modeStack->setCurrentWidget(rs485 ? m_pageRs485 : m_pageCan);
-
-    if (m_link && m_link->isOpen()) {
+    if (m_modeStack) {
+        if (mode == 2)      m_modeStack->setCurrentWidget(m_pageEtherCat);
+        else if (mode == 1) m_modeStack->setCurrentWidget(m_pageRs485);
+        else                m_modeStack->setCurrentWidget(m_pageCan);
+    }
+    // EtherCAT 是主机侧传输（不经 MCU 的 AA AA 协议），不发送命令 9，仅切页面。
+    if (mode != 2 && m_link && m_link->isOpen()) {
+        const bool rs485 = (mode == 1);
         sendCommand(proto::CMD_SET_WORK_MODE, rs485 ? 1u : 0u,
                     rs485 ? QStringLiteral("切换 RS485 模式") : QStringLiteral("切换 CAN 模式"));
     }
-    logInfo(rs485 ? QStringLiteral("工作模式：RS485") : QStringLiteral("工作模式：CAN"));
+    logInfo(mode == 2 ? QStringLiteral("工作模式：EtherCAT")
+                      : (mode == 1 ? QStringLiteral("工作模式：RS485")
+                                   : QStringLiteral("工作模式：CAN")));
 }
 
 // 协议菜单：切换 CAN 页内的协议调试页（0=CyberBeast 1=Simple 2=Open）

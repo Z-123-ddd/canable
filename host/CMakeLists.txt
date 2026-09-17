@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(canable2_host VERSION 30.0.2 LANGUAGES CXX)
+project(canable2_host VERSION 30.0.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,6 +24,37 @@ if(NOT LIBUSB_INCLUDE_DIR OR NOT LIBUSB_LIBRARY)
     message(FATAL_ERROR "未找到 libusb-1.0（期望 ${LIBUSB_ROOT}/include 与 /lib）")
 endif()
 
+# ---- SOEM (EtherCAT 主站, v2.0.0, Win32/WinPcap) —— 静态库 ----
+set(SOEM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/soem")
+add_library(soem STATIC
+    "${SOEM_DIR}/src/ec_base.c"
+    "${SOEM_DIR}/src/ec_coe.c"
+    "${SOEM_DIR}/src/ec_config.c"
+    "${SOEM_DIR}/src/ec_dc.c"
+    "${SOEM_DIR}/src/ec_eoe.c"
+    "${SOEM_DIR}/src/ec_foe.c"
+    "${SOEM_DIR}/src/ec_main.c"
+    "${SOEM_DIR}/src/ec_print.c"
+    "${SOEM_DIR}/src/ec_soe.c"
+    "${SOEM_DIR}/osal/win32/osal.c"
+    "${SOEM_DIR}/oshw/win32/oshw.c"
+    "${SOEM_DIR}/oshw/win32/nicdrv.c"
+    "${SOEM_DIR}/oshw/win32/wpcap_dynload.c"   # 运行时动态加载 wpcap.dll
+)
+target_include_directories(soem PUBLIC
+    "${SOEM_DIR}/include"                 # soem/ec_*.h + 生成的 ec_options.h
+    "${SOEM_DIR}/osal"
+    "${SOEM_DIR}/osal/win32"
+    "${SOEM_DIR}/oshw/win32"
+    "${SOEM_DIR}/oshw/win32/wpcap/Include"
+)
+# MinGW(GNU) 用 _UCRT（与 SOEM Windows.cmake 一致）
+target_compile_options(soem PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-std=c11 -Wall -Wno-unused-parameter -Wno-sign-compare>)
+# 不链接 wpcap/Packet 导入库：改由 wpcap_dynload.c 运行时加载 wpcap.dll
+# （否则无 Npcap 的机器连 exe 都启动不了）。只链接 Windows 系统库。
+target_link_libraries(soem PUBLIC ws2_32 winmm)
+
 add_executable(canable2_host WIN32
     src/main.cpp
     src/MainWindow.cpp
@@ -38,6 +69,7 @@ add_executable(canable2_host WIN32
     src/SimpleProto.cpp
     src/CanOpenProto.cpp
     src/ObjectDictionaryDialog.cpp
+    src/EtherCatLink.cpp
     resources.qrc
 )
 
@@ -54,6 +86,7 @@ target_link_libraries(canable2_host PRIVATE
     Qt6::Widgets
     Qt6::SerialPort
     ${LIBUSB_LIBRARY}
+    soem
 )
 
 # 把 libusb-1.0.dll 拷到可执行程序旁，便于直接运行

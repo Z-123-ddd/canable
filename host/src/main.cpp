@@ -241,15 +241,23 @@ static int runUiTest()
         auto *pageRs485 = w.findChild<QWidget *>("pageRs485");
         auto *act485    = w.findChild<QAction *>("actionModeRs485");
         auto *actCan    = w.findChild<QAction *>("actionModeCan");
-        menuOk = mb && stack && pageCan && pageRs485 && act485 && actCan &&
-                 stack->count() == 2 && stack->currentWidget() == pageCan &&
+        auto *actEc     = w.findChild<QAction *>("actionModeEtherCat");
+        auto *pageEc    = w.findChild<QWidget *>("pageEtherCat");
+        menuOk = mb && stack && pageCan && pageRs485 && act485 && actCan && actEc && pageEc &&
+                 stack->count() == 3 && stack->currentWidget() == pageCan &&
                  actCan->isChecked();
         if (menuOk) {
             act485->trigger();                       // 切到 RS485
             const bool toRs485 = (stack->currentWidget() == pageRs485);
+            actEc->trigger();                        // 切到 EtherCAT
+            const bool toEc = (stack->currentWidget() == pageEc);
             actCan->trigger();                       // 切回 CAN
             const bool toCan = (stack->currentWidget() == pageCan);
-            modeSwitchOk = toRs485 && toCan;
+            modeSwitchOk = toRs485 && toEc && toCan;
+            // EtherCAT 页关键控件存在 + 适配器扫描不崩溃
+            auto *ecAd = w.findChild<QComboBox *>("ecAdapterBox");
+            auto *ecScan = w.findChild<QPushButton *>("ecScanBtn");
+            if (!(ecAd && ecScan)) modeSwitchOk = false;
         }
         QString line = QStringLiteral("UITEST menu ok=%1 modeSwitch=%2")
                            .arg(menuOk ? 1 : 0).arg(modeSwitchOk ? 1 : 0);
@@ -322,7 +330,7 @@ static int runUiTest()
         auto *rsSend = w.findChild<QPushButton *>("rs485SendBtn");
         QVector<QPlainTextEdit *> logs;
         for (QPlainTextEdit *le : w.findChildren<QPlainTextEdit *>()) logs << le;
-        if (rsSend && logs.size() == 5) {
+        if (rsSend && logs.size() == 6) {   // 5 页 buildLogGroup + EtherCAT 页
             rsSend->click();
             logFanoutOk = true;
             for (QPlainTextEdit *le : logs)

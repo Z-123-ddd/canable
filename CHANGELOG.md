@@ -9,6 +9,20 @@
 
 ---
 
+## 未发布 (Unreleased) — 上位机：EtherCAT 主站（内嵌 SOEM）
+
+- **模式菜单新增「EtherCAT」**：独立页面，不走串口/USB（AA AA 协议），而是直接扫描主机网卡。
+- 内嵌 **SOEM v2.0.0**（`host/third_party/soem/`，GPLv3；见 LOCAL_PATCHES.md）作为静态库编译进上位机：
+  仅一处迁移——`osal/win32/osal.c` 的 `osal_current_time()` 改用纯 Win32
+  `GetSystemTimeAsFileTime()`（去掉 UCRT 依赖）。
+- Win32 网络层用 WinPcap API；因 MinGW ld 无 `--delayload`、直接链接会让无 Npcap 的机器
+  连启动都失败，改为 **运行时动态加载 wpcap.dll**（`wpcap_dynload.c`）：未装 Npcap 也能启动，
+  用 EtherCAT 时再提示。安装包内含可选 **Npcap 静默安装**段（放 `installer/Npcap/Npcap-installer.exe` 即随包安装）。
+- EtherCAT 页功能：**扫描网卡 / 打开关闭 / 扫描从站（ecx_config_init）/ 从站列表
+  / 过程数据映射与周期收发（WKC）/ CoE(SDO) 读写**。
+
+---
+
 ## v30.0.2（固件 + 上位机）
 
 ### 协议

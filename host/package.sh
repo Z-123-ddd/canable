@@ -44,6 +44,11 @@ cp -r installer/drivers "$DEPLOY/"
 # 厂商 32 位 DFU 运行时（helper + NsMcuCmdDll.dll 等）——被上位机核心烧录逻辑调用
 mkdir -p "$DEPLOY/vendor_dfu"
 cp -f vendor_dfu/nsi_dfu_flash.exe vendor_dfu/NsMcuCmdDll.dll vendor_dfu/USB2UARTSPIIICDLL.dll "$DEPLOY/vendor_dfu/"
+# Npcap 抓包驱动（EtherCAT 用）：若 installer/Npcap/Npcap-installer.exe 存在则随包分发
+if [ -f installer/Npcap/Npcap-installer.exe ]; then
+  mkdir -p "$DEPLOY/Npcap"
+  cp -f installer/Npcap/Npcap-installer.exe "$DEPLOY/Npcap/"
+fi
 windeployqt --release --no-translations --compiler-runtime \
             --no-system-d3d-compiler --no-opengl-sw \
             "$DEPLOY/CyberBeast-CANable2.exe"

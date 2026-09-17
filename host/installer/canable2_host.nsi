@@ -188,6 +188,18 @@ Section "品牌串口驱动 (CyberBeast USB2CAN, 可选)" SecCdcDrv
   DetailPrint "pnputil 返回: $0"
 SectionEnd
 
+
+; Npcap 抓包驱动（EtherCAT 主站运行所需；WinPcap-API 兼容）——可选/静默
+; 若随包提供 installer\Npcap\Npcap-installer.exe，则静默安装；否则跳过。
+Section "Npcap 抓包驱动 (EtherCAT 用, 可选)" SecNpcap
+  IfFileExists "$INSTDIR\Npcap\Npcap-installer.exe" 0 npcap_skip
+    DetailPrint "安装 Npcap (静默 /S)..."
+    nsExec::ExecToLog '"$INSTDIR\Npcap\Npcap-installer.exe" /S'
+    Pop $0
+    DetailPrint "Npcap 安装返回: $0"
+  npcap_skip:
+SectionEnd
+
 Section "开始菜单快捷方式" SecStartMenu
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
   CreateShortCut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\${APPEXE}"
