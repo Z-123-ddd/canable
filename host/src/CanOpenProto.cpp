@@ -201,11 +201,33 @@ static void initExamples()
     auto add = [](Example &e, quint32 id, const char *hex) {
         e.ids.append(id); e.payloads.append(QByteArray::fromHex(hex));
     };
-    const quint32 NMT = 0x000, SDO = 0x601;
+    const quint32 NMT = 0x000, SDO = 0x600;   // 基址（node=0），实际 COB-ID = 基址+node
     auto mk = [&](const char *name, const char *desc) {
         Example e; e.name = QString::fromUtf8(name); e.desc = QString::fromUtf8(desc);
         return e;
     };
+    // 枚举型可配置输入（帧内 value 位于 offset=4、1 字节）
+    auto addEnum = [](Example &e, const char *name, int frameIndex, int def,
+                      QVector<int> ch, QVector<QString> names) {
+        ExampleInput in; in.name = QString::fromUtf8(name); in.kind = CI_RAW;
+        in.frameIndex = frameIndex; in.offset = 4; in.byteLen = 1; in.defValue = def;
+        in.choices = ch; in.choiceNames = names;
+        e.inputs.append(in);
+    };
+    const QVector<int>     opModes   = { 1, 3, 4, 6, 8, 9, 10 };
+    const QVector<QString> opNames   = { QStringLiteral("PP 轮廓位置(1)"),
+                                         QStringLiteral("PV 轮廓速度(3)"),
+                                         QStringLiteral("PT 轮廓力矩(4)"),
+                                         QStringLiteral("HM 回零(6)"),
+                                         QStringLiteral("CSP 周期同步位置(8)"),
+                                         QStringLiteral("CSV 周期同步速度(9)"),
+                                         QStringLiteral("CST 周期同步力矩(10)") };
+    const QVector<int>     inModes   = { 2, 3, 6 };
+    const QVector<QString> inNames   = { QStringLiteral("速度斜坡(2)"),
+                                         QStringLiteral("位置滤波(3)"),
+                                         QStringLiteral("斜坡力矩(6)") };
+    QVector<int> homing; QVector<QString> homingNames;
+    for (int h = 1; h <= 35; ++h) { homing.append(h); homingNames.append(QString::number(h)); }
 
     { Example e = mk("周期同步力矩模式", "NMT→op，SDO 设模式/输入，控制字 6/7/15，RPDO4 目标转矩");
       add(e, NMT, "0101");
@@ -214,8 +236,10 @@ static void initExamples()
       add(e, SDO, "2B40600006000000");   // 控制字 6040h = 6
       add(e, SDO, "2B40600007000000");   // 6040h = 7
       add(e, SDO, "2B4060000F000000");   // 6040h = 15 (伺服运行)
-      add(e, 0x501, "0F006400");         // RPDO4 目标转矩
+      add(e, 0x500, "0F006400");         // RPDO4 目标转矩
       e.inputs.append({ QStringLiteral("目标力矩"), CI_TORQUE, 6, 2, 2, 1.0, 0 });  // 1.0Nm→100
+      addEnum(e, "操作模式 6060h",  1, 10, opModes, opNames);
+      addEnum(e, "输入模式 2002h:01", 2,  6, inModes, inNames);
       g_examples.append(e); }
 
     { Example e = mk("周期同步速度模式", "NMT→op，SDO 设模式/输入，控制字 6/7/15，RPDO3 目标速度");
@@ -225,8 +249,10 @@ static void initExamples()
       add(e, SDO, "2B40600006000000");
       add(e, SDO, "2B40600007000000");
       add(e, SDO, "2B4060000F000000");
-      add(e, 0x401, "0F0000080000");     // RPDO3 目标速度
+      add(e, 0x400, "0F0000080000");     // RPDO3 目标速度
       e.inputs.append({ QStringLiteral("目标速度"), CI_VEL, 6, 2, 4, 0.125, 0 });  // 0.125 rev/s
+      addEnum(e, "操作模式 6060h",  1, 9, opModes, opNames);
+      addEnum(e, "输入模式 2002h:01", 2, 2, inModes, inNames);
       g_examples.append(e); }
 
     { Example e = mk("周期同步位置模式", "NMT→op，SDO 设模式/输入，控制字 6/7/15，RPDO2 目标位置");
@@ -236,8 +262,10 @@ static void initExamples()
       add(e, SDO, "2B40600006000000");
       add(e, SDO, "2B40600007000000");
       add(e, SDO, "2B4060000F000000");
-      add(e, 0x301, "0F0000400000");     // RPDO2 目标位置
+      add(e, 0x300, "0F0000400000");     // RPDO2 目标位置
       e.inputs.append({ QStringLiteral("目标位置"), CI_POS, 6, 2, 4, 1.0, 0 });    // 1 转
+      addEnum(e, "操作模式 6060h",  1, 8, opModes, opNames);
+      addEnum(e, "输入模式 2002h:01", 2, 3, inModes, inNames);
       g_examples.append(e); }
 
     { Example e = mk("轮廓位置模式", "NMT→op，设轮廓速度/加减速，控制字 6/7/15，RPDO2 目标位置，再 0x1F 触发");
@@ -249,12 +277,13 @@ static void initExamples()
       add(e, SDO, "2B40600006000000");
       add(e, SDO, "2B40600007000000");
       add(e, SDO, "2B4060000F000000");
-      add(e, 0x301, "0F0000400000");     // RPDO2 目标位置
+      add(e, 0x300, "0F0000400000");     // RPDO2 目标位置
       add(e, SDO, "2B4060001F000000");   // 6040h = 31 (新目标位置)
       e.inputs.append({ QStringLiteral("目标位置"),   CI_POS,   8, 2, 4, 1.0, 0 });   // 1 转
       e.inputs.append({ QStringLiteral("轮廓速度"),   CI_VEL,   2, 4, 4, 50.0, 0 });  // 6081h 50 rev/s
       e.inputs.append({ QStringLiteral("轮廓加速度"), CI_ACCEL, 3, 4, 4, 10.0, 0 });  // 6083h 10 rev/s^2
       e.inputs.append({ QStringLiteral("轮廓减速度"), CI_ACCEL, 4, 4, 4, 10.0, 0 });  // 6084h
+      addEnum(e, "操作模式 6060h", 1, 1, opModes, opNames);
       g_examples.append(e); }
 
     { Example e = mk("回零模式", "NMT→op，回零方式/偏移/速度/加速度，控制字 6/7/15/31");
@@ -271,12 +300,15 @@ static void initExamples()
       e.inputs.append({ QStringLiteral("回零偏移"),   CI_POS,   3, 4, 4, 5.0, 0 });   // 607Ch 5 转
       e.inputs.append({ QStringLiteral("回零速度"),   CI_VEL,   4, 4, 4, 0.5, 0 });   // 6099h 0.5 rev/s
       e.inputs.append({ QStringLiteral("回零加速度"), CI_ACCEL, 5, 4, 4, 16.0, 0 });  // 609Ah 16 rev/s^2
+      addEnum(e, "操作模式 6060h", 1, 6, opModes, opNames);
+      addEnum(e, "回零方式 6098h", 2, 17, homing, homingNames);
       g_examples.append(e); }
 
     { Example e = mk("清零模式", "回零模式 + 回零方式 35（速度环/位置环清零），再退出回零模式");
       add(e, SDO, "2F60600006000000");   // 6060h = 6 (回零)
       add(e, SDO, "2F98600023000000");   // 6098h = 35 (清零)
       add(e, SDO, "2F60600001000000");   // 6060h = 1 (退出，轮廓位置)
+      addEnum(e, "回零方式 6098h", 1, 35, homing, homingNames);
       g_examples.append(e); }
 
     { Example e = mk("保存配置", "1010h:01 写入 'save'(0x73617665) 保存并重启");
@@ -284,12 +316,12 @@ static void initExamples()
       g_examples.append(e); }
 
     { Example e = mk("PDO 映射修改", "预操作态下把 TPDO1 映射改为[6064h 当前位置][606Ch 当前速度]");
-      add(e, SDO, "2300180181010080");   // 1800h:01 无效 TPDO1
+      add(e, SDO, "2300180180010080");   // 1800h:01 无效 TPDO1
       add(e, SDO, "2F001A0000000000");   // 1A00h:00 清空映射数
       add(e, SDO, "23001A0120006460");   // 1A00h:01 = 6064h 0020
       add(e, SDO, "23001A0220006C60");   // 1A00h:02 = 606Ch 0020
       add(e, SDO, "2F001A0002000000");   // 1A00h:00 = 2
-      add(e, SDO, "2300180181010000");   // 1800h:01 恢复 TPDO1 ID
+      add(e, SDO, "2300180180010000");   // 1800h:01 恢复 TPDO1 ID
       g_examples.append(e); }
 }
 
@@ -300,7 +332,7 @@ const QVector<Example> &examples()
 }
 
 QVector<Wire> buildExampleFrames(const Example &e, const QVector<double> &values,
-                                 const QVector<int> &units, double gear)
+                                 const QVector<int> &units, double gear, int node)
 {
     QVector<QByteArray> payloads = e.payloads;   // 从默认模板出发
     for (int i = 0; i < payloads.size() && i < e.ids.size(); ++i) {
@@ -316,6 +348,7 @@ QVector<Wire> buildExampleFrames(const Example &e, const QVector<double> &values
             case CI_VEL:    counts = velCounts(v, u, gear);   break;
             case CI_ACCEL:  counts = accelCounts(v, u, gear); break;
             case CI_TORQUE: counts = torqueCounts(v, gear);   break;
+            case CI_RAW:    counts = v;                       break;   // 原始枚举值，不换算
             }
             const qint64 raw = (qint64)std::llround(counts);
             QByteArray &pl = payloads[i];
@@ -325,8 +358,13 @@ QVector<Wire> buildExampleFrames(const Example &e, const QVector<double> &values
         }
     }
     QVector<Wire> out;
-    for (int i = 0; i < e.ids.size() && i < payloads.size(); ++i)
-        out.append(Wire{ e.ids.at(i), payloads.at(i) });
+    const quint32 n = (quint32)(node & 0x7F);
+    for (int i = 0; i < e.ids.size() && i < payloads.size(); ++i) {
+        const quint32 base = e.ids.at(i);
+        // 0x000(NMT)/0x080(SYNC) 与节点无关；其余为「功能基址」，COB-ID = 基址 + 当前节点
+        const quint32 id = (base == 0x000u || base == 0x080u) ? base : (base + n);
+        out.append(Wire{ id, payloads.at(i) });
+    }
     return out;
 }
 
@@ -656,10 +694,10 @@ bool selfTest(QString *report)
         bool velOk = false;
         for (const Example &e : ex) {
             if (e.ids.size() == 7 && e.ids.first() == 0x000 &&
-                e.ids.last() == 0x401 &&
+                e.ids.last() == 0x400 &&
                 e.payloads.first() == QByteArray::fromHex("0101")) velOk = true;
         }
-        check(velOk, QStringLiteral("周期同步速度模式序列（NMT...RPDO3=0x401）"));
+        check(velOk, QStringLiteral("周期同步速度模式序列（NMT...RPDO3 基址=0x400）"));
     }
 
     // 对象字典（EDS）
@@ -723,11 +761,17 @@ bool selfTest(QString *report)
         const Example *vel = nullptr, *pos = nullptr;
         for (const Example &e : ex) {
             if (!e.inputs.isEmpty() && e.inputs.first().kind == CI_VEL &&
-                e.ids.contains(0x401)) vel = &e;
+                e.ids.contains(0x400)) vel = &e;
             if (!e.inputs.isEmpty() && e.inputs.first().kind == CI_POS &&
-                e.ids.size() == 7 && e.ids.last() == 0x301) pos = &e;
+                e.ids.size() == 7 && e.ids.last() == 0x300) pos = &e;
         }
         check(vel != nullptr && pos != nullptr, QStringLiteral("速度/位置示例已挂输入槽"));
+        // 帧 ID 按节点重算：示例按 node=1 存储，node=5 时整体 +4（NMT 不变）
+        if (vel) {
+            const QVector<Wire> wn = buildExampleFrames(*vel, {0.125}, {0}, 1.0, 5);
+            check(!wn.isEmpty() && wn.first().id == 0x000 && wn.last().id == 0x405,
+                  QStringLiteral("速度示例 node=5 -> SDO 0x601→0x605, RPDO 0x401→0x405"));
+        }
         if (vel) {
             const QVector<Wire> w = buildExampleFrames(*vel, {0.125}, {0}, 1.0);
             check(w.size() == 7 && w.last().id == 0x401 &&
@@ -743,6 +787,31 @@ bool selfTest(QString *report)
             // 180° = 0.5 转 → 8192 = 0x2000 → 00 20 00 00
             check(w.last().data == QByteArray::fromHex("0F0000200000"),
                   QStringLiteral("位置示例 180° -> 0F 00 00 20 00 00"));
+        }
+    }
+
+    // 新增可配置输入：力矩示例 6060h 操作模式(frame1) / 2002h 输入模式(frame2)
+    {
+        const QVector<Example> &ex = examples();
+        const Example *tq = nullptr;
+        for (const Example &e : ex)
+            if (e.name.contains(QStringLiteral("力矩")) && !e.inputs.isEmpty()) tq = &e;
+        check(tq != nullptr, QStringLiteral("力矩示例存在"));
+        if (tq) {
+            bool hasOp = false, hasIn = false;
+            for (const ExampleInput &in : tq->inputs) {
+                if (in.kind == CI_RAW && in.frameIndex == 1) hasOp = true;
+                if (in.kind == CI_RAW && in.frameIndex == 2) hasIn = true;
+            }
+            check(hasOp && hasIn, QStringLiteral("力矩示例新增 操作模式/输入模式 输入项"));
+            const QVector<Wire> w = buildExampleFrames(*tq, {}, {}, 1.0, 1);
+            check(w.size() >= 3 && (quint8)w.at(1).data.at(4) == 10 && (quint8)w.at(2).data.at(4) == 6,
+                  QStringLiteral("力矩示例默认 6060h=10, 2002h=6"));
+            QVector<double> v; for (const ExampleInput &in : tq->inputs) v.append(in.defValue);
+            for (int i = 0; i < tq->inputs.size(); ++i)
+                if (tq->inputs.at(i).kind == CI_RAW && tq->inputs.at(i).frameIndex == 1) v[i] = 9;
+            const QVector<Wire> w2 = buildExampleFrames(*tq, v, {}, 1.0, 1);
+            check((quint8)w2.at(1).data.at(4) == 9, QStringLiteral("力矩示例改 6060h=9 生效"));
         }
     }
 

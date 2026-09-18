@@ -102,6 +102,15 @@ QByteArray encode(const Cmd &cmd, const QVector<double> &userValues, double gear
 Wire buildWire(int nodeId, const Cmd &cmd, const QVector<double> &userValues, double gear,
                const QVector<int> &unitIdx = QVector<int>());
 
+// 示例固定帧中的可配置输入项（原始 uint32 小端，写入指定帧 payload 的偏移）
+struct SInput {
+    QString name;         // 显示名（如「输入模式」）
+    int     frameIndex = 0;   // 固定帧序号（进入 cmdIds/payloads）
+    int     offset = 0;       // payload 内偏移
+    int     byteLen = 4;      // 字节数（1/2/4）
+    quint32 defValue = 0;     // 默认值（复现手册示例）
+};
+
 // 手册「CAN 协议实战」示例：名称 + 固定前置帧 + 可选用户输入主命令
 struct Example {
     QString name;                 // 显示名（如「位置控制」）
@@ -109,8 +118,12 @@ struct Example {
     quint8  mainCmd = 0;          // 用户输入参数所用的命令 ID（0=全固定帧，无用户输入）
     QVector<quint8>     cmdIds;   // 固定前置帧的命令 ID
     QVector<QByteArray> payloads; // 固定前置帧的 8 字节 payload
+    QVector<SInput>     inputs;   // 固定帧的可配置输入项（可为空）
 };
 const QVector<Example> &examples();
+
+// 生成示例固定帧（含输入项覆盖 + 按节点注入 CAN ID）；主命令帧由调用方另加
+QVector<Wire> buildExampleFixedFrames(const Example &e, const QVector<quint32> &values, int node);
 
 // 离线自检（编码正确性）；报告写入 report，返回 true 表示全过
 bool selfTest(QString *report);

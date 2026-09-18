@@ -69,21 +69,26 @@ static int uiEm(const QWidget *w)
     return qMax(12, h);
 }
 
-// 接收区下方 1/3：按协议手册解析的「解析区」（只读文本，逐帧一行）
-static QGroupBox *makeParseGroup(QPlainTextEdit **outEdit, const QString &title)
+// 接收区下方 1/3：按协议手册解析的「解析区」（表格：帧ID | 解析；同一 ID 就地更新一行，不滚动）
+static QGroupBox *makeParseGroup(QTableWidget **outTable, const QString &title)
 {
     auto *box = new QGroupBox(title);
     auto *v = new QVBoxLayout(box);
     v->setContentsMargins(6, 4, 6, 4);
-    auto *pe = new QPlainTextEdit;
-    pe->setReadOnly(true);
-    pe->setMaximumBlockCount(1000);
-    pe->setPlaceholderText(QStringLiteral("按协议手册解析：ID号 / 命令功能 / 数据含义（整数或浮点）"));
-    QFont pf = pe->font();
+    auto *tbl = new QTableWidget(0, 2);
+    tbl->setHorizontalHeaderLabels({QStringLiteral("帧ID(hex)"), QStringLiteral("解析")});
+    tbl->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    tbl->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    tbl->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tbl->setSelectionMode(QAbstractItemView::NoSelection);
+    tbl->setShowGrid(false);
+    tbl->setFrameShape(QFrame::NoFrame);
+    tbl->verticalHeader()->setVisible(false);
+    QFont pf = tbl->font();
     pf.setPointSize(qMax(8, pf.pointSize() - 1));
-    pe->setFont(pf);
-    v->addWidget(pe);
-    if (outEdit) *outEdit = pe;
+    tbl->setFont(pf);
+    v->addWidget(tbl);
+    if (outTable) *outTable = tbl;
     return box;
 }
 
@@ -623,9 +628,9 @@ MainWindow::MainWindow(QWidget *parent)
         rb->addWidget(m_rs485ClearRxBtn);
         rb->addStretch();
         rv->addLayout(rb);
-        { QPlainTextEdit *pe = nullptr;
-          rv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（RS485 / Modbus RTU）")), 1);
-          registerParseArea(QStringLiteral("rs485"), pe); }
+        { QTableWidget *pt = nullptr;
+          rv->addWidget(makeParseGroup(&pt, QStringLiteral("解析（RS485 / Modbus RTU）")), 1);
+          registerParseArea(QStringLiteral("rs485"), pt); }
         rsroot->setContentsMargins(6, 6, 6, 6);
         rsroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
     }
@@ -887,9 +892,9 @@ MainWindow::MainWindow(QWidget *parent)
         crb->addWidget(m_cbClearRxBtn);
         crb->addStretch();
         crv->addLayout(crb);
-        { QPlainTextEdit *pe = nullptr;
-          crv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（CyberBeast）")), 1);
-          registerParseArea(QStringLiteral("cyberbeast"), pe); }
+        { QTableWidget *pt = nullptr;
+          crv->addWidget(makeParseGroup(&pt, QStringLiteral("解析（CyberBeast）")), 1);
+          registerParseArea(QStringLiteral("cyberbeast"), pt); }
 
         croot->setContentsMargins(6, 6, 6, 6);
         croot->addWidget(makeHSplit(lcol, crxBox, 3, 2), 1);
@@ -904,7 +909,8 @@ MainWindow::MainWindow(QWidget *parent)
         connect(m_cbClearRxBtn, &QPushButton::clicked, this, [this]() {
             if (m_cbRxTable) m_cbRxTable->setRowCount(0);
             if (m_cbScrollTable) m_cbScrollTable->setRowCount(0);
-            m_cbRxRowById.clear(); });
+            m_cbRxRowById.clear();
+            clearParseAreas(); });
         connect(m_cbMasterEdit, &QLineEdit::textChanged, this, [this]() { updateCbPreview(); });
         connect(m_cbDestEdit, &QLineEdit::textChanged, this, [this]() { updateCbPreview(); });
         rebuildCbCommands();
@@ -1045,9 +1051,9 @@ MainWindow::MainWindow(QWidget *parent)
         srb->addWidget(m_simpleClearRxBtn);
         srb->addStretch();
         srv->addLayout(srb);
-        { QPlainTextEdit *pe = nullptr;
-          srv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（CAN Simple）")), 1);
-          registerParseArea(QStringLiteral("simple"), pe); }
+        { QTableWidget *pt = nullptr;
+          srv->addWidget(makeParseGroup(&pt, QStringLiteral("解析（CAN Simple）")), 1);
+          registerParseArea(QStringLiteral("simple"), pt); }
         sroot->setContentsMargins(6, 6, 6, 6);
         sroot->addWidget(makeHSplit(lcol, srxBox, 3, 2), 1);
 
@@ -1223,9 +1229,9 @@ MainWindow::MainWindow(QWidget *parent)
         crb->addWidget(m_coClearRxBtn);
         crb->addStretch();
         rv->addLayout(crb);
-        { QPlainTextEdit *pe = nullptr;
-          rv->addWidget(makeParseGroup(&pe, QStringLiteral("解析（CANopen）")), 1);
-          registerParseArea(QStringLiteral("canopen"), pe); }
+        { QTableWidget *pt = nullptr;
+          rv->addWidget(makeParseGroup(&pt, QStringLiteral("解析（CANopen）")), 1);
+          registerParseArea(QStringLiteral("canopen"), pt); }
         oroot->setContentsMargins(6, 6, 6, 6);
         oroot->addWidget(makeHSplit(lcol, rxBox, 3, 2), 1);
 
@@ -1292,6 +1298,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (m_simpleRxTable) m_simpleRxTable->setRowCount(0);
         if (m_simpleScrollTable) m_simpleScrollTable->setRowCount(0);
         m_simpleRxRowById.clear();
+        clearParseAreas();
     });
     connect(m_simpleNodeEdit, &QLineEdit::textChanged, this, [this]() { updateSimplePreview(); });
     connect(m_simpleGearEdit, &QLineEdit::textChanged, this, [this]() { updateSimplePreview(); });
@@ -1340,6 +1347,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (m_coRxTable) m_coRxTable->setRowCount(0);
         if (m_coScrollTable) m_coScrollTable->setRowCount(0);
         m_coRxRowById.clear();
+        clearParseAreas();
     });
     // RS485 页（布局与通用CAN一致；协议/发送待实现）
     connect(m_rs485SendBtn, &QPushButton::clicked, this, [this]() {
@@ -1351,6 +1359,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_rs485ClearRxBtn, &QPushButton::clicked, this, [this]() {
         if (m_rs485RxTable) m_rs485RxTable->setRowCount(0);
         if (m_rs485ScrollTable) m_rs485ScrollTable->setRowCount(0);
+        clearParseAreas();
     });
     connect(m_rs485ModeBtn, &QToolButton::clicked, this, [this]() {
         m_rs485ScrollMode = !m_rs485ScrollMode;
@@ -1915,6 +1924,7 @@ void MainWindow::onClearRx()
     m_rxTable->setRowCount(0);          // 静止：就地更新表
     m_rxRowById.clear();
     if (m_scrollTable) m_scrollTable->setRowCount(0);   // 滚动：滚动表
+    clearParseAreas();                  // 同时清空解析区
 }
 
 void MainWindow::onClearLog()
@@ -2335,7 +2345,25 @@ void MainWindow::rebuildSimpleParams()
     m_simpleUnitBoxes.clear();
     m_sdoOpcodeBox = nullptr; m_sdoEndpointEdit = nullptr;
     m_sdoTypeBox = nullptr;   m_sdoValueEdit = nullptr;
+    m_simpleExEdits.clear();
     auto *g = new QGridLayout(m_simpleParamArea);
+    int baseRow = 0;
+    {   // 实战示例：固定帧的可配置输入项
+        const int exIdx = curSimpleExample();
+        if (exIdx >= 0 && exIdx < simple::examples().size()) {
+            const simple::Example &ex = simple::examples().at(exIdx);
+            for (int k = 0; k < ex.inputs.size(); ++k) {
+                const simple::SInput &in = ex.inputs.at(k);
+                g->addWidget(new QLabel(in.name + QLatin1Char(':')), baseRow, 0);
+                auto *e = new QLineEdit(QString::number(in.defValue));
+                e->setObjectName(QStringLiteral("simpleExVal%1").arg(k));
+                g->addWidget(e, baseRow, 1);
+                m_simpleExEdits.append(e);
+                connect(e, &QLineEdit::textChanged, this, [this]() { updateSimplePreview(); });
+                ++baseRow;
+            }
+        }
+    }
     const simple::Cmd *c = curSimpleCmd(m_simpleCmdBox);
     if (c && c->id == 0x04) {   // RxSdo：opcode + Endpoint + 写类型 + Value(仅写模式)
         int row = 0;
@@ -2381,7 +2409,7 @@ void MainWindow::rebuildSimpleParams()
         return;
     }
     if (c) {
-        int row = 0;
+        int row = baseRow;
         for (int i = 0; i < c->params.size(); ++i) {
             const simple::Param &p = c->params.at(i);
             if (p.type == simple::P_RESV) {   // 保留字节：不显示，占位保持下标对齐
@@ -2524,10 +2552,14 @@ QVector<QByteArray> MainWindow::buildSimpleFrames(QString *err) const
         const simple::Example &e = simple::examples().at(ex);
         const int node = m_simpleNodeEdit ? m_simpleNodeEdit->text().toInt() : 1;
         if (node < 0 || node > 31) { if (err) *err = QStringLiteral("节点ID 需在 0..31"); return out; }
-        for (int i = 0; i < e.cmdIds.size(); ++i) {
-            out.append(proto::buildDataFrame(simple::canId(node, e.cmdIds.at(i)), false, false,
-                                             false, false, proto::bytesToDlc(8), e.payloads.at(i)));
-        }
+        QVector<quint32> vals;
+        for (int k = 0; k < e.inputs.size(); ++k)
+            vals.append((k < m_simpleExEdits.size() && m_simpleExEdits.at(k))
+                            ? m_simpleExEdits.at(k)->text().toUInt()
+                            : e.inputs.at(k).defValue);
+        for (const simple::Wire &w : simple::buildExampleFixedFrames(e, vals, node))
+            out.append(proto::buildDataFrame(w.id, false, false, false, false,
+                                             proto::bytesToDlc(8), w.data));
         if (e.mainCmd != 0) {          // 主命令：参数由用户输入（含单位换算）
             QString e2;
             QByteArray f = buildSimpleFrame(&e2);
@@ -2618,7 +2650,7 @@ void MainWindow::simpleAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    if (m_simpleScrollTable->rowCount() > 5000) m_simpleScrollTable->removeRow(0);
+    enforceScrollCap(m_simpleScrollTable, row, f.data.size());
     applyRxFilter(m_simpleScrollTable);
     if (follow) m_simpleScrollTable->scrollToBottom();
 }
@@ -2677,23 +2709,38 @@ void MainWindow::rebuildCoParams()
         for (int k = 0; k < e.inputs.size(); ++k) {
             const canopen::ExampleInput &in = e.inputs.at(k);
             g->addWidget(new QLabel(in.name + QLatin1Char(':')), row, 0);
-            auto *ve = new QLineEdit(QString::number(in.defValue));
-            ve->setObjectName(QStringLiteral("coExVal%1").arg(k));
-            g->addWidget(ve, row, 1);
-            m_coExValEdits.append(ve);
-            connect(ve, &QLineEdit::textChanged, this, [this]() { updateCoPreview(); });
-
+            QLineEdit *ve = nullptr;
             QComboBox *ub = nullptr;
-            const QVector<QString> units = canopen::coUnitNames(in.kind);
-            if (!units.isEmpty()) {
+            if (!in.choices.isEmpty()) {
+                // 枚举输入：下拉选择（itemData = 候选值），放在本行第1列
                 ub = new QComboBox;
-                for (const QString &u : units) ub->addItem(u);
-                ub->setCurrentIndex(in.defUnit >= 0 && in.defUnit < units.size() ? in.defUnit : 0);
+                for (int i = 0; i < in.choices.size(); ++i)
+                    ub->addItem(i < in.choiceNames.size() ? in.choiceNames.at(i)
+                                                          : QString::number(in.choices.at(i)),
+                                in.choices.at(i));
+                const int di = ub->findData((int)in.defValue);
+                ub->setCurrentIndex(di >= 0 ? di : 0);
                 ub->setObjectName(QStringLiteral("coExUnit%1").arg(k));
-                g->addWidget(ub, row, 2);
+                g->addWidget(ub, row, 1);
                 connect(ub, QOverload<int>::of(&QComboBox::currentIndexChanged),
                         this, [this](int) { updateCoPreview(); });
+            } else {
+                ve = new QLineEdit(QString::number(in.defValue));
+                ve->setObjectName(QStringLiteral("coExVal%1").arg(k));
+                g->addWidget(ve, row, 1);
+                connect(ve, &QLineEdit::textChanged, this, [this]() { updateCoPreview(); });
+                const QVector<QString> units = canopen::coUnitNames(in.kind);
+                if (!units.isEmpty()) {
+                    ub = new QComboBox;
+                    for (const QString &u : units) ub->addItem(u);
+                    ub->setCurrentIndex(in.defUnit >= 0 && in.defUnit < units.size() ? in.defUnit : 0);
+                    ub->setObjectName(QStringLiteral("coExUnit%1").arg(k));
+                    g->addWidget(ub, row, 2);
+                    connect(ub, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                            this, [this](int) { updateCoPreview(); });
+                }
             }
+            m_coExValEdits.append(ve);
             m_coExUnitBoxes.append(ub);
             ++row;
         }
@@ -3047,9 +3094,8 @@ void MainWindow::coAddCurrentToList()
         e.pv = { double(m_coHbStateBox ? m_coHbStateBox->currentData().toInt() : 5) };
     } else if (e.example >= 0) {
         for (int k = 0; k < m_coExValEdits.size(); ++k) {
-            e.pv.append(m_coExValEdits.at(k) ? m_coExValEdits.at(k)->text().toDouble() : 0.0);
-            QComboBox *ub = (k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
-            e.pu.append(ub ? ub->currentIndex() : 0);
+            e.pv.append(coExValue(k));
+            e.pu.append(coExUnit(k));
         }
     } else {   // PDO：仅数值（映射固定）
         for (int k = 0; k < m_coPdoValEdits.size(); ++k)
@@ -3122,9 +3168,10 @@ void MainWindow::coRestoreFromEntry(int row)
         }
     } else if (e.example >= 0) {
         for (int k = 0; k < m_coExValEdits.size() && k < e.pv.size(); ++k)
-            if (m_coExValEdits.at(k)) m_coExValEdits.at(k)->setText(QString::number(e.pv.at(k)));
+            coExSet(k, e.pv.at(k));
         for (int k = 0; k < m_coExUnitBoxes.size() && k < e.pu.size(); ++k)
-            if (m_coExUnitBoxes.at(k) && e.pu.at(k) >= 0) m_coExUnitBoxes.at(k)->setCurrentIndex(e.pu.at(k));
+            if (m_coExValEdits.value(k) && m_coExUnitBoxes.at(k) && e.pu.at(k) >= 0)
+                m_coExUnitBoxes.at(k)->setCurrentIndex(e.pu.at(k));
     } else {   // PDO
         for (int k = 0; k < m_coPdoValEdits.size() && k < e.pv.size(); ++k)
             if (m_coPdoValEdits.at(k)) m_coPdoValEdits.at(k)->setText(QString::number(e.pv.at(k)));
@@ -3211,12 +3258,11 @@ QVector<QByteArray> MainWindow::buildCoFrames(QString *err) const
         QVector<double> vals;
         QVector<int>    units;
         for (int k = 0; k < e.inputs.size(); ++k) {
-            vals.append((k < m_coExValEdits.size() && m_coExValEdits.at(k))
-                            ? m_coExValEdits.at(k)->text().toDouble() : e.inputs.at(k).defValue);
-            QComboBox *ub = (k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
-            units.append(ub ? ub->currentIndex() : e.inputs.at(k).defUnit);
+            vals.append(coExValue(k));
+            units.append(coExUnit(k));
         }
-        for (const canopen::Wire &w : canopen::buildExampleFrames(e, vals, units, gear))
+        const int coNode = m_coNodeEdit ? m_coNodeEdit->text().toInt() : 1;
+        for (const canopen::Wire &w : canopen::buildExampleFrames(e, vals, units, gear, coNode))
             out.append(dataFrame(w.id, w.data));
         return out;
     }
@@ -3457,7 +3503,7 @@ void MainWindow::coAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    if (m_coScrollTable->rowCount() > 5000) m_coScrollTable->removeRow(0);
+    enforceScrollCap(m_coScrollTable, row, f.data.size());
     applyRxFilter(m_coScrollTable);
     if (follow) m_coScrollTable->scrollToBottom();
 }
@@ -3607,7 +3653,7 @@ void MainWindow::appendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    if (m_scrollTable->rowCount() > 5000) m_scrollTable->removeRow(0);   // 上限，滚掉最旧行
+    enforceScrollCap(m_scrollTable, row, f.data.size());
     applyRxFilter(m_scrollTable);
     if (follow) m_scrollTable->scrollToBottom();   // 仅当原本在底部时才跟随
 }
@@ -3784,24 +3830,92 @@ void MainWindow::applyPauseUi()
     }
 }
 
-void MainWindow::registerParseArea(const QString &key, QPlainTextEdit *pe)
+void MainWindow::registerParseArea(const QString &key, QTableWidget *tbl)
 {
-    if (!pe) return;
-    pe->setObjectName(QStringLiteral("parse_") + key);   // 便于自测定位
-    m_parseAreas.insert(key, pe);
+    if (!tbl) return;
+    tbl->setObjectName(QStringLiteral("parse_") + key);   // 便于自测定位
+    m_parseAreas.insert(key, tbl);
+    m_parseRowById.insert(key, QHash<quint32, int>());
+}
+
+// CANopen 实战示例输入项取值/写回（枚举下拉用 itemData，普通输入用文本框）
+double MainWindow::coExValue(int k) const
+{
+    QLineEdit *le = (k >= 0 && k < m_coExValEdits.size()) ? m_coExValEdits.at(k) : nullptr;
+    if (le) return le->text().toDouble();
+    QComboBox *cb = (k >= 0 && k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
+    if (cb) return cb->currentData().toDouble();
+    return 0.0;
+}
+int MainWindow::coExUnit(int k) const
+{
+    if (k >= 0 && k < m_coExValEdits.size() && m_coExValEdits.at(k)) {
+        QComboBox *ub = (k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
+        return ub ? ub->currentIndex() : 0;
+    }
+    return 0;
+}
+void MainWindow::coExSet(int k, double v)
+{
+    QLineEdit *le = (k >= 0 && k < m_coExValEdits.size()) ? m_coExValEdits.at(k) : nullptr;
+    if (le) { le->setText(QString::number(v)); return; }
+    QComboBox *cb = (k >= 0 && k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
+    if (cb) { const int i = cb->findData((int)v); if (i >= 0) cb->setCurrentIndex(i); }
+}
+
+// 滚动接收区上限：累计帧数据超 kScrollMaxBytes(256MB) 时丢弃最旧行，由新数据填充。
+// 每行的帧字节数记录在该行第 0 个单元格的 Qt::UserRole 上，便于精确扣除。
+void MainWindow::enforceScrollCap(QTableWidget *t, int row, int frameBytes)
+{
+    if (!t) return;
+    if (auto *it = t->item(row, 0)) it->setData(Qt::UserRole, frameBytes);
+    qint64 &acc = m_scrollBytes[t];
+    acc += frameBytes;
+    while (acc > kScrollMaxBytes && t->rowCount() > 1) {
+        qint64 s = 0;
+        if (auto *it0 = t->item(0, 0)) s = it0->data(Qt::UserRole).toLongLong();
+        t->removeRow(0);
+        acc -= s;
+        if (acc < 0) { acc = 0; break; }
+    }
 }
 
 void MainWindow::appendParse(const QString &key, const proto::RxFrame &f)
 {
-    QPlainTextEdit *pe = m_parseAreas.value(key, nullptr);
-    if (!pe) return;
+    QTableWidget *tbl = m_parseAreas.value(key, nullptr);
+    if (!tbl) return;
     QString line;
     if (key == QLatin1String("cyberbeast"))   line = frameParse::cyberBeast(f);
     else if (key == QLatin1String("simple"))  line = frameParse::simple(f);
     else if (key == QLatin1String("canopen")) line = frameParse::canopen(f);
     else if (key == QLatin1String("rs485"))   line = frameParse::rs485(f);
     else                                      line = frameParse::generic(f);
-    pe->appendPlainText(line);
+
+    // 就地显示：同一 ID 为一条记录，更新所在行，不新增、不滚动
+    QHash<quint32, int> &map = m_parseRowById[key];
+    int row = map.value(f.id, -1);
+    if (row < 0 || row >= tbl->rowCount()) {
+        row = tbl->rowCount();
+        tbl->insertRow(row);
+        for (int c = 0; c < 2; c++) {
+            auto *it = new QTableWidgetItem;
+            it->setFlags(Qt::ItemIsEnabled);
+            tbl->setItem(row, c, it);
+        }
+        map.insert(f.id, row);
+    }
+    tbl->item(row, 0)->setText(
+        QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+    tbl->item(row, 1)->setText(line);
+}
+
+// 清空全部解析区（所有协议页）；由各页「清空接收」调用
+void MainWindow::clearParseAreas()
+{
+    for (auto it = m_parseAreas.begin(); it != m_parseAreas.end(); ++it)
+        if (it.value()) it.value()->setRowCount(0);
+    m_parseRowById.clear();
+    m_scrollBytes.clear();   // 各滚动区已空，重置字节计数
 }
 
 void MainWindow::onTogglePause()
@@ -4106,7 +4220,7 @@ void MainWindow::cbAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    if (m_cbScrollTable->rowCount() > 5000) m_cbScrollTable->removeRow(0);
+    enforceScrollCap(m_cbScrollTable, row, f.data.size());
     applyRxFilter(m_cbScrollTable);
     if (follow) m_cbScrollTable->scrollToBottom();
 }
@@ -4180,6 +4294,10 @@ void MainWindow::saveSettings()
     st.setValue("ui/protocol", (int)(m_protoStack ? m_protoStack->currentIndex() : 3));
     // Simple 协议页数据
     if (m_simpleNodeEdit) st.setValue("simple/node", m_simpleNodeEdit->text());
+    st.setValue("simple/exN", m_simpleExEdits.size());
+    for (int k = 0; k < m_simpleExEdits.size(); ++k)
+        st.setValue(QStringLiteral("simple/exVal%1").arg(k),
+                    m_simpleExEdits.at(k) ? m_simpleExEdits.at(k)->text() : QString());
     if (m_simpleGearEdit) st.setValue("simple/gear", m_simpleGearEdit->text());
     if (m_simpleCmdBox)   st.setValue("simple/cmd",  m_simpleCmdBox->currentData().toInt());
     st.setValue("simple/nparam", m_simpleParamEdits.size());
@@ -4202,10 +4320,8 @@ void MainWindow::saveSettings()
     {
         st.setValue("co/exN", m_coExValEdits.size());
         for (int k = 0; k < m_coExValEdits.size(); ++k) {
-            st.setValue(QStringLiteral("co/exVal%1").arg(k),
-                        m_coExValEdits.at(k) ? m_coExValEdits.at(k)->text() : QString());
-            QComboBox *ub = (k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
-            st.setValue(QStringLiteral("co/exUnit%1").arg(k), ub ? ub->currentIndex() : -1);
+            st.setValue(QStringLiteral("co/exVal%1").arg(k), coExValue(k));
+            st.setValue(QStringLiteral("co/exUnit%1").arg(k), coExUnit(k));
         }
     }
     if (m_coFuncBox)  st.setValue("co/func", m_coFuncBox->currentData(Qt::UserRole).toInt());
@@ -4385,6 +4501,10 @@ void MainWindow::loadSettings()
     // Simple 协议页数据
     {
         if (m_simpleNodeEdit) m_simpleNodeEdit->setText(st.value("simple/node", QStringLiteral("1")).toString());
+        for (int k = 0; k < m_simpleExEdits.size(); ++k)
+            if (m_simpleExEdits.at(k))
+                m_simpleExEdits.at(k)->setText(
+                    st.value(QStringLiteral("simple/exVal%1").arg(k), m_simpleExEdits.at(k)->text()).toString());
         if (m_simpleGearEdit) m_simpleGearEdit->setText(st.value("simple/gear", QStringLiteral("1")).toString());
         if (m_simpleCmdBox) {
             int rowSel = -1;
@@ -4456,15 +4576,15 @@ void MainWindow::loadSettings()
         coLoadCoList();   // 恢复命令列表
         // PDO 映射修改示例：不恢复（每次打开用所选 PDO 的当前映射）
         // 实战示例用户输入（位置/速度/力矩）
-        for (int k = 0; k < m_coExValEdits.size(); ++k)
-            if (m_coExValEdits.at(k))
-                m_coExValEdits.at(k)->setText(
-                    st.value(QStringLiteral("co/exVal%1").arg(k), m_coExValEdits.at(k)->text()).toString());
-        for (int k = 0; k < m_coExUnitBoxes.size(); ++k) {
-            QComboBox *ub = m_coExUnitBoxes.at(k);
-            if (!ub) continue;
-            const int ui = st.value(QStringLiteral("co/exUnit%1").arg(k), -1).toInt();
-            if (ui >= 0 && ui < ub->count()) ub->setCurrentIndex(ui);
+        for (int k = 0; k < m_coExValEdits.size(); ++k) {
+            const double dv = st.value(QStringLiteral("co/exVal%1").arg(k),
+                                       m_coExValEdits.value(k) ? m_coExValEdits.at(k)->text().toDouble() : 0.0).toDouble();
+            coExSet(k, dv);
+            QComboBox *ub = (k < m_coExUnitBoxes.size()) ? m_coExUnitBoxes.at(k) : nullptr;
+            if (ub && m_coExValEdits.value(k)) {
+                const int ui = st.value(QStringLiteral("co/exUnit%1").arg(k), -1).toInt();
+                if (ui >= 0 && ui < ub->count()) ub->setCurrentIndex(ui);
+            }
         }
         updateCoPreview();
     }

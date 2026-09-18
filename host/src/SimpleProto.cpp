@@ -292,6 +292,8 @@ static void initExamples()
         e.mainCmd = 0;
         e.cmdIds = { 0x07, 0x07 };
         e.payloads = { hex("0400000000000000"), hex("0700000000000000") };
+        e.inputs = { { QStringLiteral("电机校准状态"), 0, 0, 4, 4 },
+                     { QStringLiteral("编码器校准状态"), 1, 0, 4, 7 } };
         g_examples.append(e);
     }
     // 速度控制：Set_Controller_Mode(0x0B)=2/2 → Set_Axis_State(0x07)=8 → Set_Input_Vel(0x0D) 由用户输入
@@ -302,6 +304,9 @@ static void initExamples()
         e.mainCmd = 0x0D;
         e.cmdIds = { 0x0B, 0x07 };
         e.payloads = { hex("0200000002000000"), hex("0800000000000000") };
+        e.inputs = { { QStringLiteral("控制模式"), 0, 0, 4, 2 },
+                     { QStringLiteral("输入模式"), 0, 4, 4, 2 },
+                     { QStringLiteral("轴状态"),   1, 0, 4, 8 } };
         g_examples.append(e);
     }
     // 位置控制：Set_Controller_Mode(0x0B)=3/3 → Set_Axis_State(0x07)=8 → Set_Input_Pos(0x0C) 由用户输入
@@ -312,18 +317,40 @@ static void initExamples()
         e.mainCmd = 0x0C;
         e.cmdIds = { 0x0B, 0x07 };
         e.payloads = { hex("0300000003000000"), hex("0800000000000000") };
+        e.inputs = { { QStringLiteral("控制模式"), 0, 0, 4, 3 },
+                     { QStringLiteral("输入模式"), 0, 4, 4, 3 },
+                     { QStringLiteral("轴状态"),   1, 0, 4, 8 } };
         g_examples.append(e);
     }
-    // RxSdo 实战：读母线电压 → 写减速比 9.25 → 读减速比
+    // RxSdo 实战（可配置）：读/写、Endpoint、写入值由命令 0x04 参数区决定；
+    // 目标节点取页面「节点ID」。选中本示例即复用 0x04 的参数输入。
     {
         Example e;
         e.name = QStringLiteral("RxSdo 读写（实战）");
-        e.desc = QStringLiteral("读母线电压(0x0002) → 写减速比 9.25(0x00F2) → 读减速比");
-        e.mainCmd = 0;
-        e.cmdIds = { 0x04, 0x04, 0x04 };
-        e.payloads = { hex("0002000000000000"), hex("01F2000000001441"), hex("00F2000000000000") };
+        e.desc = QStringLiteral("RxSdo 可配置：opcode 选读/写 + Endpoint + 写入值，节点取页面节点ID");
+        e.mainCmd = 0x04;
+        e.cmdIds = {};
+        e.payloads = {};
         g_examples.append(e);
     }
+}
+
+QVector<Wire> buildExampleFixedFrames(const Example &e, const QVector<quint32> &values, int node)
+{
+    QVector<Wire> out;
+    for (int i = 0; i < e.cmdIds.size() && i < e.payloads.size(); ++i) {
+        QByteArray pl = e.payloads.at(i);
+        for (int k = 0; k < e.inputs.size(); ++k) {
+            const SInput &in = e.inputs.at(k);
+            if (in.frameIndex != i) continue;
+            const quint32 v = (k < values.size()) ? values.at(k) : in.defValue;
+            const int n = qMin(in.byteLen, pl.size() - in.offset);
+            for (int b = 0; b < n; ++b)
+                pl[in.offset + b] = char((v >> (8 * b)) & 0xFF);
+        }
+        out.append(Wire{ canId(node, e.cmdIds.at(i)), pl });
+    }
+    return out;
 }
 
 const QVector<Example> &examples()
@@ -436,6 +463,25 @@ bool selfTest(QString *report)
         }
         check(posOk, QStringLiteral("位置控制示例：0x0B=3/3 + 0x07=8 + 用户输入 0x0C"));
         check(velOk, QStringLiteral("速度控制示例：0x0B=2/2 + 0x07=8 + 用户输入 0x0D"));
+    }
+    // 示例固定帧的可配置输入项：默认复现手册；改值生效
+    {
+        const QVector<Example> &ex = examples();
+        const Example *pos = nullptr;
+        for (const Example &e : ex) if (e.mainCmd == 0x0C && !e.inputs.isEmpty()) pos = &e;
+        check(pos != nullptr, QStringLiteral("位置控制示例已挂固定帧输入项"));
+        if (pos) {
+            const QVector<Wire> w = buildExampleFixedFrames(*pos, {}, 1);
+            check(w.size() == 2 && w.at(0).id == 0x2B && w.at(1).id == 0x27 &&
+                  (quint8)w.at(0).data.at(0) == 3 && (quint8)w.at(0).data.at(4) == 3 &&
+                  (quint8)w.at(1).data.at(0) == 8,
+                  QStringLiteral("位置示例默认 控制=3 输入=3 轴状态=8"));
+            QVector<quint32> v = { 4, 5, 6 };
+            const QVector<Wire> w2 = buildExampleFixedFrames(*pos, v, 1);
+            check((quint8)w2.at(0).data.at(0) == 4 && (quint8)w2.at(0).data.at(4) == 5 &&
+                  (quint8)w2.at(1).data.at(0) == 6,
+                  QStringLiteral("位置示例改 控制=4 输入=5 轴状态=6 生效"));
+        }
     }
 
     if (report) *report = log; else Q_UNUSED(log);

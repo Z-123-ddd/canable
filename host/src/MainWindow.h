@@ -251,8 +251,14 @@ private:
 
     void setProtocol(int which);    // 协议菜单：切协议调试页（0=CyberBeast 1=Simple 2=Open）
     // ---- 接收“解析区”（4 个协议页接收区下方 1/3）----
-    void registerParseArea(const QString &key, QPlainTextEdit *pe);
-    void appendParse(const QString &key, const proto::RxFrame &f);   // 按 key 协议解析并追加
+    void registerParseArea(const QString &key, QTableWidget *tbl);
+    void appendParse(const QString &key, const proto::RxFrame &f);   // 按 key 协议解析，按 ID 就地更新
+    // CANopen 实战示例输入项：取值 / 单位索引 / 写回（枚举下拉回退到文本框）
+    double coExValue(int k) const;
+    int    coExUnit(int k) const;
+    void   coExSet(int k, double v);
+    void clearParseAreas();                                          // 清空全部解析区（所有协议页）
+    void enforceScrollCap(QTableWidget *t, int row, int frameBytes);  // 滚动区 256MB 上限
     QPushButton *makePauseButton();          // 生成接收区“暂停/恢复”按钮并登记
     void applyPauseUi();                     // 按 m_rxPaused 刷新所有暂停按钮文本/接收状态
     // ---- CyberBeast 协议页 ----
@@ -388,6 +394,7 @@ private:
     QLineEdit   *m_simpleGearEdit = nullptr;    // 减速比
     QWidget     *m_simpleParamArea = nullptr;   // 参数输入容器
     QVector<QLineEdit *> m_simpleParamEdits;    // 参数输入框（随命令重建）
+    QVector<QLineEdit *> m_simpleExEdits;    // Simple 实战示例固定帧输入项
     QVector<QComboBox *> m_simpleUnitBoxes;     // 每个参数所选单位（与 m_simpleParamEdits 平行，可为空）
     // RxSdo(0x04) 专用控件：opcode(读/写) + Endpoint + 写类型 + Value（仅写模式生效）
     QComboBox   *m_sdoOpcodeBox = nullptr;
@@ -462,7 +469,10 @@ private:
     // ---- 接收暂停 ----
     bool m_rxPaused = false;                 // true=接收已暂停（下发命令 11 + 冻结本机）
     QVector<QPushButton *> m_pauseBtns;      // 各接收区的暂停按钮（文本随状态刷新）
-    QHash<QString, QPlainTextEdit *> m_parseAreas;   // 协议 key -> 解析区文本控件
+    QHash<QString, QTableWidget *> m_parseAreas;             // 协议 key -> 解析区表格
+    QHash<QString, QHash<quint32, int>> m_parseRowById;      // 协议 key -> (帧ID -> 行号)，就地更新
+    QHash<QTableWidget *, qint64> m_scrollBytes;            // 各滚动区累计帧数据字节数
+    static constexpr qint64 kScrollMaxBytes = 256LL * 1024 * 1024;   // 滚动区上限 256MB
     QLineEdit *m_rxPartialEdit = nullptr;    // (预留)
     // ---- CyberBeast 协议页控件 ----
     QLineEdit   *m_cbMasterEdit = nullptr;   // 主站(源)地址

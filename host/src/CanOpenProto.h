@@ -70,6 +70,7 @@ enum CoInputKind {
     CI_VEL,      // 输出轴速度：转每秒 / 弧度每秒 / 转每分
     CI_ACCEL,    // 输出轴加速度：转每二次方秒 / 弧度每二次方秒
     CI_TORQUE,   // 输出轴力矩：Nm（无单位下拉）
+    CI_RAW,      // 原始整数值（操作模式/输入模式/回零方式等枚举）：不做单位换算
 };
 
 // 单位名（下拉显示）；CI_TORQUE 返回空
@@ -93,6 +94,8 @@ struct ExampleInput {
     int         byteLen = 4;      // 数值字节数（1/2/4）
     double      defValue = 0.0;   // 默认值（复现手册示例）
     int         defUnit = 0;      // 默认单位索引
+    QVector<int>     choices;     // 非空 → 该输入为枚举下拉（值为候选，如操作模式）
+    QVector<QString> choiceNames; // 与 choices 等长（显示名）
 };
 
 // 手册「CANopen 协议实战」示例：名称 + 逐帧固定序列（node_id=1）
@@ -107,7 +110,8 @@ const QVector<Example> &examples();
 
 // 按用户输入值/单位/减速比，生成某示例的完整帧序列（含固定帧与重算后的数值）
 QVector<Wire> buildExampleFrames(const Example &e, const QVector<double> &values,
-                                 const QVector<int> &units, double gear);
+                                 const QVector<int> &units, double gear,
+                                 int node = 1);   // 示例帧 ID 按 node 重算（存储时按 node=1）
 
 // ---- 对象字典（EDS）----
 struct OdEntry {

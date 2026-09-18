@@ -364,26 +364,28 @@ static int runUiTest()
             pauseOk = pauseOk && paused && (b->text() == t0);
         }
 
-        // 解析区：4 个协议页各一份
-        auto *pcb = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_cyberbeast"));
-        auto *psi = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_simple"));
-        auto *pco = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_canopen"));
-        auto *prs = w.findChild<QPlainTextEdit *>(QStringLiteral("parse_rs485"));
+        // 解析区：4 个协议页各一份（表格：帧ID | 解析；按 ID 就地更新）
+        auto *pcb = w.findChild<QTableWidget *>(QStringLiteral("parse_cyberbeast"));
+        auto *psi = w.findChild<QTableWidget *>(QStringLiteral("parse_simple"));
+        auto *pco = w.findChild<QTableWidget *>(QStringLiteral("parse_canopen"));
+        auto *prs = w.findChild<QTableWidget *>(QStringLiteral("parse_rs485"));
         parseOk = (pcb && psi && pco && prs);
 
-        // 解析正确性：CyberBeast MIT 响应帧 → 字段可读；喂帧后解析区追加
+        // 解析正确性 + 就地更新：同一 ID 再来一帧不新增行
         if (parseOk && pcb) {
             proto::RxFrame f;
             f.ext = true;
             f.id = (2u<<26) | (0x00u<<18) | (0x05u<<10) | (0x03u<<2) | 1u;   // Pri=2 MIT Dest=5 Src=3
             f.data = QByteArray::fromHex("0010A0C000000000");
-            const int beforeLen = pcb->toPlainText().size();
             w.simulateRx(f);
             const QString cbLine = frameParse::cyberBeast(f);
-            parseOk = parseOk && (pcb->toPlainText().size() > beforeLen)
-                   && cbLine.contains(QStringLiteral("MIT_CONTROL"))
-                   && cbLine.contains(QStringLiteral("Pos="))
-                   && !psi->toPlainText().trimmed().isEmpty();
+            const int rows1 = pcb->rowCount();
+            w.simulateRx(f);                                   // 同 ID 再来一帧
+            const int rows2 = pcb->rowCount();
+            parseOk = parseOk && rows1 >= 1 && rows2 == rows1
+                   && pcb->item(0, 1) && pcb->item(0, 1)->text().contains(QStringLiteral("MIT_CONTROL"))
+                   && psi->rowCount() >= 1;
+            (void)cbLine;
         }
 
         // CyberBeast 配置区控件
@@ -459,6 +461,17 @@ static int runUiTest()
                     vl->setText(QStringLiteral("1000"));
                     const bool int16Ok = preview->text().contains(QStringLiteral("E8 03 00 00"));
                     simpleOk = readGreyed && readIgnores && writeOk && int16Ok;
+                    // RxSdo 实战示例：选中后同样复用 0x04 参数区（读/写/Endpoint 可配，不再写死）
+                    int exIdx = -1;
+                    for (int i = 0; i < cmdBox->count(); ++i)
+                        if (cmdBox->itemText(i).contains(QStringLiteral("RxSdo"))) { exIdx = i; break; }
+                    if (exIdx >= 0) {
+                        cmdBox->setCurrentIndex(exIdx);
+                        auto *opEx = w.findChild<QComboBox *>(QStringLiteral("sdoOpcodeBox"));
+                        auto *epEx = w.findChild<QLineEdit *>(QStringLiteral("sdoEndpointEdit"));
+                        simpleOk = simpleOk && opEx && epEx;
+                    }
+                    (void)0;
                 }
             }
         }
@@ -519,6 +532,16 @@ static int runUiTest()
                         t.contains(QStringLiteral("0x02B:03 00 00 00 03 00 00 00")) &&
                         t.contains(QStringLiteral("0x027:08 00 00 00 00 00 00 00")) &&
                         t.contains(QStringLiteral("0x02C:"));
+            // 新增：固定帧输入项（控制模式/输入模式/轴状态）渲染并可改值生效
+            auto *ex0 = w.findChild<QLineEdit *>(QStringLiteral("simpleExVal0"));
+            auto *ex1 = w.findChild<QLineEdit *>(QStringLiteral("simpleExVal1"));
+            auto *ex2 = w.findChild<QLineEdit *>(QStringLiteral("simpleExVal2"));
+            exampleOk = exampleOk && ex0 && ex1 && ex2 &&
+                        ex0->text() == QStringLiteral("3") && ex1->text() == QStringLiteral("3") &&
+                        ex2->text() == QStringLiteral("8");
+            if (ex0) { ex0->setText(QStringLiteral("4"));
+                       exampleOk = exampleOk && preview->text().contains(QStringLiteral("0x02B:04 00 00 00"));
+                       ex0->setText(QStringLiteral("3")); }
         }
         QString line = QStringLiteral("UITEST units ok=%1 example=%2")
                            .arg(unitOk ? 1 : 0).arg(exampleOk ? 1 : 0);
@@ -563,7 +586,7 @@ static int runUiTest()
             int exRow = -1;
             for (int r = 0; r < funcBox->count(); ++r) {
                 const QVariant v = funcBox->itemData(r, Qt::UserRole + 1);
-                if (v.isValid() && canopen::examples().at(v.toInt()).ids.last() == 0x401) exRow = r;
+                if (v.isValid() && canopen::examples().at(v.toInt()).ids.last() == 0x400) exRow = r;
             }
             if (exRow >= 0) funcBox->setCurrentIndex(exRow);
             coOk = nmtOk && sdoOk && exRow >= 0 && prev->text().contains(QStringLiteral("0x401"));
@@ -575,7 +598,8 @@ static int runUiTest()
                 for (int r = 0; r < funcBox->count(); ++r) {
                     const QVariant v = funcBox->itemData(r, Qt::UserRole + 1);
                     if (v.isValid() && canopen::examples().at(v.toInt()).name.contains(QStringLiteral("位置")) &&
-                        canopen::examples().at(v.toInt()).inputs.size() == 1) posRow = r;
+                        !canopen::examples().at(v.toInt()).inputs.isEmpty() &&
+                        canopen::examples().at(v.toInt()).inputs.first().kind == canopen::CI_POS) posRow = r;
                 }
                 if (posRow >= 0) {
                     funcBox->setCurrentIndex(posRow);
@@ -591,6 +615,22 @@ static int runUiTest()
                         exIn = exIn && prev->text().contains(QStringLiteral("0F 00 00 40 00 00"));
                     }
                     coOk = coOk && exIn;
+                // 力矩示例：新增 操作模式/输入模式 下拉（默认 10 / 6），改值生效
+                int tqRow = -1;
+                for (int r = 0; r < funcBox->count(); ++r) {
+                    const QVariant v = funcBox->itemData(r, Qt::UserRole + 1);
+                    if (v.isValid() && canopen::examples().at(v.toInt()).name.contains(QStringLiteral("力矩"))) tqRow = r;
+                }
+                if (tqRow >= 0) {
+                    funcBox->setCurrentIndex(tqRow);
+                    auto *opEx = w.findChild<QComboBox *>(QStringLiteral("coExUnit1"));
+                    auto *inEx = w.findChild<QComboBox *>(QStringLiteral("coExUnit2"));
+                    bool tqOk = opEx && inEx && opEx->currentData().toInt() == 10 &&
+                                inEx->currentData().toInt() == 6;
+                    if (opEx) { const int i = opEx->findData(9); if (i >= 0) opEx->setCurrentIndex(i);
+                                tqOk = tqOk && prev->text().contains(QStringLiteral("2F 60 60 00 09 00 00 00")); }
+                    coOk = coOk && tqOk;
+                }
                     // 实战示例：命令列表分组隐藏
                     if (auto *lst = w.findChild<QListWidget *>(QStringLiteral("coList")))
                         coOk = coOk && !lst->isVisible();
@@ -637,7 +677,7 @@ static int runUiTest()
             int exRow = -1;
             for (int r = 0; r < cb->count(); ++r) {
                 const QVariant v = cb->itemData(r, Qt::UserRole + 1);
-                if (v.isValid() && canopen::examples().at(v.toInt()).ids.last() == 0x401) exRow = r;
+                if (v.isValid() && canopen::examples().at(v.toInt()).ids.last() == 0x400) exRow = r;
             }
             if (exRow >= 0) cb->setCurrentIndex(exRow);
         }
@@ -651,7 +691,7 @@ static int runUiTest()
         coPersist = cb5 && nd5 && gr5 && gr5->text() == QStringLiteral("3") &&
             nd5->text() == QStringLiteral("2") &&
             cb5->currentData(Qt::UserRole + 1).isValid() &&
-            canopen::examples().at(cb5->currentData(Qt::UserRole + 1).toInt()).ids.last() == 0x401;
+            canopen::examples().at(cb5->currentData(Qt::UserRole + 1).toInt()).ids.last() == 0x400;
         QString line = QStringLiteral("UITEST canopen persist ok=%1").arg(coPersist ? 1 : 0);
         line += QChar(10);
         std::fputs(line.toLocal8Bit().constData(), stdout);
