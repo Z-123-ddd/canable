@@ -626,7 +626,10 @@ static int runUiTest()
                     auto *opEx = w.findChild<QComboBox *>(QStringLiteral("coExUnit1"));
                     auto *inEx = w.findChild<QComboBox *>(QStringLiteral("coExUnit2"));
                     bool tqOk = opEx && inEx && opEx->currentData().toInt() == 10 &&
-                                inEx->currentData().toInt() == 6;
+                                inEx->currentData().toInt() == 6 &&
+                                inEx->count() == 10 &&
+                                inEx->itemText(2).contains(QStringLiteral("速度斜坡")) &&
+                                inEx->itemText(2).contains(QStringLiteral("(2)"));   // 2002h 完整枚举
                     if (opEx) { const int i = opEx->findData(9); if (i >= 0) opEx->setCurrentIndex(i);
                                 tqOk = tqOk && prev->text().contains(QStringLiteral("2F 60 60 00 09 00 00 00")); }
                     coOk = coOk && tqOk;

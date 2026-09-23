@@ -59,6 +59,10 @@ enum SdoType {
 QVector<QString> sdoTypeNames();
 int sdoTypeBytes(int type);                        // 该类型字节数（1/2/4）
 
+// 对象 2002h:01「输入模式」枚举（值与中文名，供所有写 2002h 的命令复用）
+QVector<int>     inputModeValues();
+QVector<QString> inputModeNames();
+
 // 目标转矩/速度/位置等 RPDO 快捷帧：RPDO 数据 0..8 字节
 Wire buildPdo(Function f, int node, const QByteArray &data);
 

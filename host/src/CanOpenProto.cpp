@@ -85,6 +85,28 @@ QVector<QString> sdoTypeNames()
              QStringLiteral("float32") };
 }
 
+// 对象 2002h:01「输入模式」枚举：值 + 中文名（值后缀），顺序与固件 INPUT_MODE_* 一致
+//   INPUT_MODE_INACTIVE=0 PASSTHROUGH=1 VEL_RAMP=2 POS_FILTER=3 MIX_CHANNELS=4
+//   TRAP_TRAJ=5 TORQUE_RAMP=6 MIRROR=7 TUNING=8 MIT=9
+QVector<int> inputModeValues()
+{
+    return { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+}
+
+QVector<QString> inputModeNames()
+{
+    return { QStringLiteral("无效(0)"),
+             QStringLiteral("直通(1)"),
+             QStringLiteral("速度斜坡(2)"),
+             QStringLiteral("位置滤波(3)"),
+             QStringLiteral("混控通道(4)"),
+             QStringLiteral("梯形轨迹(5)"),
+             QStringLiteral("力矩斜坡(6)"),
+             QStringLiteral("镜像(7)"),
+             QStringLiteral("整定(8)"),
+             QStringLiteral("MIT(9)") };
+}
+
 int sdoTypeBytes(int type)
 {
     switch (type) {
@@ -222,10 +244,8 @@ static void initExamples()
                                          QStringLiteral("CSP 周期同步位置(8)"),
                                          QStringLiteral("CSV 周期同步速度(9)"),
                                          QStringLiteral("CST 周期同步力矩(10)") };
-    const QVector<int>     inModes   = { 2, 3, 6 };
-    const QVector<QString> inNames   = { QStringLiteral("速度斜坡(2)"),
-                                         QStringLiteral("位置滤波(3)"),
-                                         QStringLiteral("斜坡力矩(6)") };
+    const QVector<int>     inModes   = inputModeValues();   // 2002h:01 完整枚举
+    const QVector<QString> inNames   = inputModeNames();
     QVector<int> homing; QVector<QString> homingNames;
     for (int h = 1; h <= 35; ++h) { homing.append(h); homingNames.append(QString::number(h)); }
 
@@ -812,6 +832,37 @@ bool selfTest(QString *report)
                 if (tq->inputs.at(i).kind == CI_RAW && tq->inputs.at(i).frameIndex == 1) v[i] = 9;
             const QVector<Wire> w2 = buildExampleFrames(*tq, v, {}, 1.0, 1);
             check((quint8)w2.at(1).data.at(4) == 9, QStringLiteral("力矩示例改 6060h=9 生效"));
+        }
+    }
+
+    // 2002h:01 输入模式枚举：10 项、值 0..9、中文名带值后缀
+    {
+        const QVector<int> iv = inputModeValues();
+        const QVector<QString> nm = inputModeNames();
+        check(iv.size() == 10 && nm.size() == 10, QStringLiteral("输入模式枚举 10 项"));
+        check(iv.first() == 0 && iv.last() == 9 && iv.at(2) == 2 && iv.at(9) == 9,
+              QStringLiteral("输入模式值 0..9（含 2=速度斜坡, 9=MIT）"));
+        check(nm.first().contains(QStringLiteral("无效")) && nm.first().contains(QStringLiteral("(0)")) &&
+              nm.at(2).contains(QStringLiteral("速度斜坡")) && nm.at(2).contains(QStringLiteral("(2)")) &&
+              nm.at(9).contains(QStringLiteral("MIT")) && nm.at(9).contains(QStringLiteral("(9)")),
+              QStringLiteral("输入模式中文名带值后缀"));
+        // 写 2002h 的示例：默认值属于完整枚举且可改为他值
+        const QVector<Example> &ex = examples();
+        const Example *vel = nullptr;
+        for (const Example &e : ex) if (e.ids.size() == 7 && e.ids.last() == 0x400) vel = &e;
+        check(vel != nullptr, QStringLiteral("速度示例存在（写 2002h）"));
+        if (vel) {
+            int kIn = -1;
+            for (int k = 0; k < vel->inputs.size(); ++k)
+                if (vel->inputs.at(k).kind == CI_RAW && vel->inputs.at(k).frameIndex == 2) kIn = k;
+            check(kIn >= 0 && vel->inputs.at(kIn).choices.size() == 10,
+                  QStringLiteral("速度示例 2002h 输入为 10 项枚举"));
+            QVector<double> v; QVector<int> u;
+            for (const ExampleInput &in : vel->inputs) { v.append(in.defValue); u.append(in.defUnit); }
+            v[kIn] = 9;   // 改成 MIT(9)
+            const QVector<Wire> w = buildExampleFrames(*vel, v, u, 1.0, 1);
+            check(w.size() >= 3 && (quint8)w.at(2).data.at(4) == 9,
+                  QStringLiteral("速度示例 2002h 可改为 MIT(9)"));
         }
     }
 
