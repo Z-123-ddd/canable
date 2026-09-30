@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(canable2_host VERSION 30.0.6 LANGUAGES C CXX)
+project(canable2_host VERSION 30.0.7 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,6 +55,21 @@ target_compile_options(soem PRIVATE
 # （否则无 Npcap 的机器连 exe 都启动不了）。只链接 Windows 系统库。
 target_link_libraries(soem PUBLIC ws2_32 winmm)
 
+# ---- 厂商 joint-sdk（SOEM v2 之上的机器人关节 CiA402 SDK；静态库）----
+# 直接用宿主工具链(MinGW)编译其 C 源码，并复用上面的 soem 目标（避免两份 SOEM）。
+set(JSDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/joint_sdk")
+add_library(jointsdk STATIC
+    "${JSDK_DIR}/src/transport.c"
+    "${JSDK_DIR}/src/cia402.c"
+    "${JSDK_DIR}/src/sdo_async.c"
+    "${JSDK_DIR}/src/esi_parser.c"
+    "${JSDK_DIR}/src/profile_cyberbeast_joint_module.c"
+    "${JSDK_DIR}/src/dc_timing_conf.c"
+)
+target_include_directories(jointsdk PUBLIC "${JSDK_DIR}/include")
+target_link_libraries(jointsdk PUBLIC soem)
+set_target_properties(jointsdk PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
 add_executable(canable2_host WIN32
     src/main.cpp
     src/MainWindow.cpp
@@ -70,7 +85,11 @@ add_executable(canable2_host WIN32
     src/CanOpenProto.cpp
     src/FrameParse.cpp
     src/ObjectDictionaryDialog.cpp
+    src/CommandClipboardDialog.cpp
+    src/CommandEditDialog.cpp
+    src/EsiXml.cpp
     src/EtherCatLink.cpp
+    src/JointController.cpp
     resources.qrc
 )
 
@@ -80,13 +99,16 @@ set_target_properties(canable2_host PROPERTIES OUTPUT_NAME "CyberBeast-ProtocolT
 target_include_directories(canable2_host PRIVATE src ${LIBUSB_INCLUDE_DIR})
 
 # 应用版本号（供「帮助→关于」显示；与 package.sh 的 APPVER 保持一致）
+# 内置「当前固件最新版本号」：上位机不随固件改动，仅用于在「关于」里比对 USB 上报的固件版本
 target_compile_definitions(canable2_host PRIVATE
-    APP_VERSION="${PROJECT_VERSION}")
+    APP_VERSION="${PROJECT_VERSION}"
+    FW_VERSION="30.0.5")
 
 target_link_libraries(canable2_host PRIVATE
     Qt6::Widgets
     Qt6::SerialPort
     ${LIBUSB_LIBRARY}
+    jointsdk
     soem
 )
 
@@ -104,4 +126,12 @@ add_custom_command(TARGET canable2_host POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor_dfu"
         "$<TARGET_FILE_DIR:canable2_host>/vendor_dfu"
     COMMENT "Copy vendor_dfu runtime (nsi_dfu_flash.exe + NsMcuCmdDll.dll) next to CyberBeast-ProtocolTool.exe"
+)
+
+# joint-sdk 运行期数据（DC 定时配置 + 关节 ESI）拷到 exe 旁的 joint_sdk/
+add_custom_command(TARGET canable2_host POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${JSDK_DIR}"
+        "$<TARGET_FILE_DIR:canable2_host>/joint_sdk"
+    COMMENT "Copy joint-sdk runtime data (dc_timing.conf + ECAT_CIA402.xml) next to the exe"
 )

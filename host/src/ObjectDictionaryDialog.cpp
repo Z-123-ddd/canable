@@ -78,6 +78,7 @@ ObjectDictionaryDialog::ObjectDictionaryDialog(QWidget *parent)
     readBtn->setObjectName(QStringLiteral("odReadBtn"));
     auto *writeBtn = new QPushButton(QStringLiteral("写 (SDO)"));
     writeBtn->setObjectName(QStringLiteral("odWriteBtn"));
+    m_readBtn = readBtn; m_writeBtn = writeBtn;
     auto *closeBtn = new QPushButton(QStringLiteral("关闭"));
     bot->addWidget(readBtn);
     bot->addWidget(writeBtn);
@@ -146,6 +147,14 @@ void ObjectDictionaryDialog::onSelectionChanged()
         const int t = sdoTypeFromOdType(typeItem->text());
         if (t >= 0 && t < m_typeBox->count()) m_typeBox->setCurrentIndex(t);
     }
+    // 按 EDS 访问类型约束 读/写：ro/const 禁用「写」，wo 禁用「读」
+    const canopen::OdEntry *od = canopen::findOd(m_rows.at(r).index,
+                                                m_rows.at(r).sub < 0 ? 0 : m_rows.at(r).sub);
+    const QString acc = od ? od->access.trimmed().toLower() : QString();
+    const bool canWrite = (acc != QLatin1String("ro") && acc != QLatin1String("const"));
+    const bool canRead  = (acc != QLatin1String("wo"));
+    if (m_readBtn)  m_readBtn->setEnabled(canRead);
+    if (m_writeBtn) m_writeBtn->setEnabled(canWrite);
 }
 
 void ObjectDictionaryDialog::onReadClicked()

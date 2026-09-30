@@ -8,7 +8,7 @@
 # ============================================================================
 set -euo pipefail
 
-APPVER="${APPVER:-30.0.6}"
+APPVER="${APPVER:-30.0.7}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
@@ -44,6 +44,9 @@ cp -r installer/drivers "$DEPLOY/"
 # 厂商 32 位 DFU 运行时（helper + NsMcuCmdDll.dll 等）——被上位机核心烧录逻辑调用
 mkdir -p "$DEPLOY/vendor_dfu"
 cp -f vendor_dfu/nsi_dfu_flash.exe vendor_dfu/NsMcuCmdDll.dll vendor_dfu/USB2UARTSPIIICDLL.dll "$DEPLOY/vendor_dfu/"
+# joint-sdk 运行期数据（DC 定时配置 dc_timing.conf + 关节 ESI ECAT_CIA402.xml）
+mkdir -p "$DEPLOY/joint_sdk"
+cp -r -f "$BUILD/joint_sdk/." "$DEPLOY/joint_sdk/"
 # Npcap 抓包驱动（EtherCAT 用）：随包内置官方安装程序，安装时调用其图形界面
 NPCAP_EXE=""
 if [ -d installer/Npcap ]; then

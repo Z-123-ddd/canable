@@ -9,6 +9,11 @@
 #include "CanOpenProto.h"
 #include "EtherCatLink.h"
 #include "ObjectDictionaryDialog.h"
+#include "CommandClipboardDialog.h"
+#include "ServoDs402.h"
+#include "EsiXml.h"
+#include "JointController.h"
+#include "CommandEditDialog.h"
 #include "FrameParse.h"
 #include <cstring>
 #include <cmath>
@@ -35,6 +40,7 @@
 #include <QSignalBlocker>
 #include <QFontMetrics>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFile>
 #include <QTextStream>
 #include <QTimer>
@@ -46,6 +52,7 @@
 #include <QSettings>
 #include <QEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -53,6 +60,8 @@
 #include <QActionGroup>
 #include <QStackedWidget>
 #include <QListWidget>
+#include <QRegularExpression>
+#include <QStandardItemModel>
 #include <QSize>
 #include <QSplitter>
 #include <QScreen>
@@ -108,8 +117,26 @@ static QSplitter *makeHSplit(QWidget *left, QWidget *right, int stretchL = 3, in
     return sp;
 }
 
-static void fitWindowToScreen(QWidget *win)
+// 垂直分隔条：把「列表」与「日志」分成上下两块，可上下拉动调整列表高度；
+// 拉动时压缩下方（日志）区域。日志自身设了最小高度（约一行），不会被拖没。
+static QSplitter *makeListLogSplit(QWidget *top, QWidget *bottom)
 {
+    auto *sp = new QSplitter(Qt::Vertical);
+    sp->setObjectName(QStringLiteral("listLogSplit"));
+    sp->setChildrenCollapsible(false);
+    sp->setOpaqueResize(true);
+    sp->setHandleWidth(6);
+    sp->addWidget(top);
+    sp->addWidget(bottom);
+    sp->setStretchFactor(0, 3);
+    sp->setStretchFactor(1, 1);
+    QList<int> sizes;
+    sizes << 300 << 100;
+    sp->setSizes(sizes);
+    return sp;
+}
+
+static void fitWindowToScreen(QWidget *win){
     if (!win) return;
     QScreen *sc = win->screen();
     if (!sc) sc = QGuiApplication::primaryScreen();
@@ -211,7 +238,6 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_serial = new SerialLink(this);
     m_usb    = new UsbLink(this);
-    m_ethercat = new EtherCatLink(this);
     m_link   = m_serial;                 // 默认串口
     for (Link *lk : { (Link *)m_serial, (Link *)m_usb }) {
         connect(lk, &Link::opened,             this, &MainWindow::onPortOpened);
@@ -297,8 +323,19 @@ MainWindow::MainWindow(QWidget *parent)
 
     lv->addWidget(frameBox);
 
+    // 单条发送按钮（仅取单帧编辑区）
+    {
+        auto *sg = new QHBoxLayout;
+        m_sendSingleBtn = new QPushButton(QStringLiteral("单条发送"));
+        m_sendSingleBtn->setObjectName("sendSingleBtn");
+        m_sendSingleBtn->setToolTip(QStringLiteral("发送单帧编辑区中的这一条命令"));
+        sg->addWidget(m_sendSingleBtn);
+        sg->addStretch();
+        lv->addLayout(sg);
+    }
+
     // ---------------- 发送列表（表格） ----------------
-    auto *listBox = new QGroupBox(QStringLiteral("发送列表 (勾选决定发送：≥2 列表 / 1 单帧 / 0 用编辑区；最多 20 行)"));
+    auto *listBox = new QGroupBox(QStringLiteral("发送列表 (勾选行后点“列表发送”；最多 20 行)"));
     auto *llv = new QVBoxLayout(listBox);
     llv->setSpacing(6);
     m_table = new QTableWidget(0, COL_COUNT);
@@ -333,34 +370,42 @@ MainWindow::MainWindow(QWidget *parent)
     m_resetBtn->setObjectName("resetBtn");
     m_exportBtn = new QPushButton(QStringLiteral("导出CSV"));
     m_exportBtn->setObjectName("exportBtn");
+    m_exportClipBtn = new QPushButton(QStringLiteral("导出列表记录"));
+    m_exportClipBtn->setObjectName("exportClipBtn");
+    m_exportClipBtn->setToolTip(QStringLiteral("把列表记录（帧ID|数据|标准/扩展）弹出到剪切栏窗口，可复制或导出文件"));
     m_importBtn = new QPushButton(QStringLiteral("导入记录"));
     m_importBtn->setObjectName("importBtn");
     m_importBtn->setToolTip(QStringLiteral("导入其他 CAN 工具导出的记录(CSV/ASC/TRC/candump)到发送列表"));
-    auto *hint = new QLabel(QStringLiteral("行内直接填写；勾选√决定发送行"));
+    m_sendListBtn = new QPushButton(QStringLiteral("列表发送"));
+    m_sendListBtn->setObjectName("sendListBtn");
+    m_sendListBtn->setToolTip(QStringLiteral("按顺序发送发送列表中已勾选的行"));
+    auto *hint = new QLabel(QStringLiteral("行内直接填写；勾选√决定列表发送的行"));
     hint->setStyleSheet("color:#666;");
+    lb->addWidget(m_sendListBtn);
     lb->addWidget(m_resetBtn);
     lb->addWidget(m_importBtn);
     lb->addWidget(m_exportBtn);
+    lb->addWidget(m_exportClipBtn);
     lb->addWidget(hint);
     lb->addStretch(1);
     llv->addWidget(btnRow, /*stretch*/ 0);
-    lv->addWidget(listBox, 3);   // 列表区随窗口伸缩
-
-    // ---------------- 操作 ----------------
+    // 列表区与下方（操作/日志）用垂直分隔条分开：可上下拉动调整列表高度，压缩日志
     auto *opBox = new QGroupBox(QStringLiteral("操作"));
     auto *oh = new QHBoxLayout(opBox);
-    m_sendBtn = new QPushButton(QStringLiteral("发送"));
-    m_sendBtn->setObjectName("sendBtn");
     m_stopBtn = new QPushButton(QStringLiteral("停止"));
     m_statusBtn = new QPushButton(QStringLiteral("查询状态"));
-    oh->addWidget(m_sendBtn);
     oh->addWidget(m_stopBtn);
     oh->addWidget(m_statusBtn);
     oh->addStretch();
-    lv->addWidget(opBox);
-
-    // ---------------- 日志（每页各一份，状态共享；[0] 即本页=规范）----------------
-    lv->addWidget(buildLogGroup(), 1);
+    {
+        auto *bottomPane = new QWidget;
+        auto *bl = new QVBoxLayout(bottomPane);
+        bl->setContentsMargins(0, 0, 0, 0);
+        bl->setSpacing(6);
+        bl->addWidget(opBox);
+        bl->addWidget(buildLogGroup(), 1);   // 日志（本页规范份）
+        lv->addWidget(makeListLogSplit(listBox, bottomPane), /*stretch*/ 1);
+    }
 
     // ======================= 右列：接收 =======================
     auto *rxBox = new QGroupBox(QStringLiteral("接收区"));
@@ -436,7 +481,12 @@ MainWindow::MainWindow(QWidget *parent)
     auto *rb = new QHBoxLayout;
     m_clearRxBtn = new QPushButton(QStringLiteral("清空接收"));
     m_clearRxBtn->setObjectName("clearRxBtn");
+    auto *ecs_canExportRxBtn = new QPushButton(QStringLiteral("导出接收"));
+    ecs_canExportRxBtn->setObjectName(QStringLiteral("canExportRxBtn"));
+    ecs_canExportRxBtn->setToolTip(QStringLiteral("导出当前接收区的数据为 CSV/文本"));
+    connect(ecs_canExportRxBtn, &QPushButton::clicked, this, &MainWindow::onExportRx);
     rb->addWidget(m_clearRxBtn);
+    rb->addWidget(ecs_canExportRxBtn);
     rb->addStretch();
     rv->addLayout(rb);
 
@@ -625,7 +675,12 @@ MainWindow::MainWindow(QWidget *parent)
         auto *rb = new QHBoxLayout;
         m_rs485ClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
         m_rs485ClearRxBtn->setObjectName("rs485ClearRxBtn");
+        auto *ecs_rs485ExportRxBtn = new QPushButton(QStringLiteral("导出接收"));
+        ecs_rs485ExportRxBtn->setObjectName(QStringLiteral("rs485ExportRxBtn"));
+        ecs_rs485ExportRxBtn->setToolTip(QStringLiteral("导出当前接收区的数据为 CSV/文本"));
+        connect(ecs_rs485ExportRxBtn, &QPushButton::clicked, this, &MainWindow::onExportRx);
         rb->addWidget(m_rs485ClearRxBtn);
+        rb->addWidget(ecs_rs485ExportRxBtn);
         rb->addStretch();
         rv->addLayout(rb);
         { QTableWidget *pt = nullptr;
@@ -643,7 +698,7 @@ MainWindow::MainWindow(QWidget *parent)
         auto *lcol = new QWidget;
         auto *lcl = new QVBoxLayout(lcol);
 
-        // ---- 连接（网卡）----
+        // ---- 连接（网卡）：joint-sdk 统一驱动，这里仅用于选择网卡 ----
         auto *cBox = new QGroupBox(QStringLiteral("连接（EtherCAT 主站 / 网卡）"));
         auto *cv = new QVBoxLayout(cBox);
         auto *cr1 = new QHBoxLayout;
@@ -655,79 +710,41 @@ MainWindow::MainWindow(QWidget *parent)
         m_ecRefreshBtn = new QPushButton(QStringLiteral("刷新"));
         m_ecRefreshBtn->setObjectName("ecRefreshBtn");
         cr1->addWidget(m_ecRefreshBtn);
-        m_ecOpenBtn = new QPushButton(QStringLiteral("打开"));
-        m_ecOpenBtn->setObjectName("ecOpenBtn");
-        cr1->addWidget(m_ecOpenBtn);
         cv->addLayout(cr1);
         m_ecStatusLbl = new QLabel(QStringLiteral("未连接"));
         m_ecStatusLbl->setObjectName("ecStatusLbl");
         cv->addWidget(m_ecStatusLbl);
         lcl->addWidget(cBox);
 
-        // ---- 从站 ----
-        auto *sBox = new QGroupBox(QStringLiteral("从站"));
-        auto *sv = new QVBoxLayout(sBox);
-        auto *sr = new QHBoxLayout;
-        m_ecScanBtn = new QPushButton(QStringLiteral("扫描从站"));
-        m_ecScanBtn->setObjectName("ecScanBtn");
-        sr->addWidget(m_ecScanBtn);
-        sr->addStretch();
-        sv->addLayout(sr);
-        m_ecSlaveTable = new QTableWidget(0, 7);
-        m_ecSlaveTable->setObjectName("ecSlaveTable");
-        m_ecSlaveTable->setHorizontalHeaderLabels({
-            QStringLiteral("位置"), QStringLiteral("名称"), QStringLiteral("状态"),
-            QStringLiteral("AL状态码"), QStringLiteral("配置地址"),
-            QStringLiteral("Vendor"), QStringLiteral("Product")});
-        m_ecSlaveTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-        for (int c : {0, 2, 3, 4, 5, 6})
-            m_ecSlaveTable->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
-        m_ecSlaveTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        m_ecSlaveTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-        m_ecSlaveTable->verticalHeader()->setVisible(false);
-        m_ecSlaveTable->setMinimumHeight(160);
-        sv->addWidget(m_ecSlaveTable, 1);
-        lcl->addWidget(sBox, 1);
-
-        // ---- 过程数据 ----
-        auto *pBox = new QGroupBox(QStringLiteral("过程数据 (Process Data)"));
-        auto *pv = new QVBoxLayout(pBox);
-        auto *pr = new QHBoxLayout;
-        m_ecMapBtn = new QPushButton(QStringLiteral("映射 (config_map)"));
-        m_ecMapBtn->setObjectName("ecMapBtn");
-        m_ecRunBtn = new QPushButton(QStringLiteral("启动周期"));
-        m_ecRunBtn->setObjectName("ecRunBtn");
-        m_ecWkcLbl = new QLabel(QStringLiteral("WKC: -"));
-        m_ecWkcLbl->setObjectName("ecWkcLbl");
-        pr->addWidget(m_ecMapBtn);
-        pr->addWidget(m_ecRunBtn);
-        pr->addSpacing(12);
-        pr->addWidget(m_ecWkcLbl);
-        pr->addStretch();
-        pv->addLayout(pr);
-        lcl->addWidget(pBox);
-
-        // ---- CoE (SDO) ----
-        auto *oBox = new QGroupBox(QStringLiteral("CoE (SDO 读写)"));
-        auto *og = new QGridLayout(oBox);
-        og->addWidget(new QLabel(QStringLiteral("从站:")), 0, 0);
-        m_ecSlaveSpin = new QSpinBox;
-        m_ecSlaveSpin->setObjectName("ecSlaveSpin");
-        m_ecSlaveSpin->setRange(1, 200);
-        og->addWidget(m_ecSlaveSpin, 0, 1);
-        og->addWidget(new QLabel(QStringLiteral("索引(hex):")), 0, 2);
+        // ---- 对象字典（ESI XML）+ SDO 读写（均走 joint-sdk）----
+        auto *xBox = new QGroupBox(QStringLiteral("对象字典 (ESI XML) + SDO 读写"));
+        auto *xl = new QGridLayout(xBox);
+        m_ecImportXmlBtn = new QPushButton(QStringLiteral("导入XML(ESI)…"));
+        m_ecImportXmlBtn->setObjectName("ecImportXmlBtn");
+        m_ecImportXmlBtn->setToolTip(QStringLiteral("上传从站 ESI/XML：解析对象字典与 PDO 映射（配置关节时作为 profile）"));
+        m_ecXmlLabel = new QLabel(QStringLiteral("未导入"));
+        m_ecXmlLabel->setObjectName("ecXmlLabel");
+        m_ecXmlLabel->setStyleSheet("color:#666;");
+        xl->addWidget(m_ecImportXmlBtn, 0, 0);
+        xl->addWidget(m_ecXmlLabel, 0, 1, 1, 5);
+        xl->addWidget(new QLabel(QStringLiteral("对象:")), 1, 0);
+        m_ecObjBox = new QComboBox;
+        m_ecObjBox->setObjectName("ecObjBox");
+        m_ecObjBox->setMinimumWidth(uiEm(this) * 20);
+        xl->addWidget(m_ecObjBox, 1, 1, 1, 5);
+        xl->addWidget(new QLabel(QStringLiteral("索引(hex):")), 2, 0);
         m_ecIndexEdit = new QLineEdit(QStringLiteral("0x6040"));
         m_ecIndexEdit->setObjectName("ecIndexEdit");
-        og->addWidget(m_ecIndexEdit, 0, 3);
-        og->addWidget(new QLabel(QStringLiteral("子索引:")), 0, 4);
+        xl->addWidget(m_ecIndexEdit, 2, 1);
+        xl->addWidget(new QLabel(QStringLiteral("子索引:")), 2, 2);
         m_ecSubEdit = new QLineEdit(QStringLiteral("0"));
         m_ecSubEdit->setObjectName("ecSubEdit");
-        og->addWidget(m_ecSubEdit, 0, 5);
-        og->addWidget(new QLabel(QStringLiteral("值(hex):")), 1, 0);
+        xl->addWidget(m_ecSubEdit, 2, 3);
+        xl->addWidget(new QLabel(QStringLiteral("值(hex):")), 3, 0);
         m_ecValEdit = new QLineEdit;
         m_ecValEdit->setObjectName("ecValEdit");
         m_ecValEdit->setPlaceholderText(QStringLiteral("写：如 06 00（小端）"));
-        og->addWidget(m_ecValEdit, 1, 1, 1, 5);
+        xl->addWidget(m_ecValEdit, 3, 1, 1, 5);
         auto *ob = new QHBoxLayout;
         m_ecSdoReadBtn = new QPushButton(QStringLiteral("读 SDO"));
         m_ecSdoReadBtn->setObjectName("ecSdoReadBtn");
@@ -736,11 +753,58 @@ MainWindow::MainWindow(QWidget *parent)
         ob->addWidget(m_ecSdoReadBtn);
         ob->addWidget(m_ecSdoWriteBtn);
         ob->addStretch();
-        og->addLayout(ob, 2, 0, 1, 6);
+        xl->addLayout(ob, 4, 0, 1, 6);
         m_ecSdoResultLbl = new QLabel;
         m_ecSdoResultLbl->setObjectName("ecSdoResultLbl");
-        og->addWidget(m_ecSdoResultLbl, 3, 0, 1, 6);
-        lcl->addWidget(oBox);
+        xl->addWidget(m_ecSdoResultLbl, 5, 0, 1, 6);
+        lcl->addWidget(xBox);
+
+        // ---- 关节驱动（厂商 joint-sdk）：configure->activate(OP)->使能->周期 ----
+        auto *jBox = new QGroupBox(QStringLiteral("关节驱动 (joint-sdk, 推荐)"));
+        auto *jg = new QGridLayout(jBox);
+        jg->addWidget(new QLabel(QStringLiteral("从站:")), 0, 0);
+        m_jointPosSpin = new QSpinBox;
+        m_jointPosSpin->setObjectName("jointPosSpin");
+        m_jointPosSpin->setRange(1, 200);
+        m_jointPosSpin->setValue(1);
+        jg->addWidget(m_jointPosSpin, 0, 1);
+        jg->addWidget(new QLabel(QStringLiteral("模式:")), 0, 2);
+        m_jointModeBox = new QComboBox;
+        m_jointModeBox->setObjectName("jointModeBox");
+        m_jointModeBox->addItem(QStringLiteral("CSP 周期同步位置 (8)"), 8);
+        m_jointModeBox->addItem(QStringLiteral("CSV 周期同步速度 (9)"), 9);
+        m_jointModeBox->addItem(QStringLiteral("CST 周期同步力矩 (10)"), 10);
+        jg->addWidget(m_jointModeBox, 0, 3);
+        m_jointOpenBtn = new QPushButton(QStringLiteral("打开+配置"));
+        m_jointOpenBtn->setObjectName("jointOpenBtn");
+        m_jointOpenBtn->setToolTip(QStringLiteral("打开网卡并配置关节（写 PDO 分配/PO2SO/DC，进入 SAFE_OP）；用已导入的 ESI（否则内置 profile）"));
+        m_jointActivateBtn = new QPushButton(QStringLiteral("激活 (OP)"));
+        m_jointActivateBtn->setObjectName("jointActivateBtn");
+        jg->addWidget(m_jointOpenBtn, 1, 0);
+        jg->addWidget(m_jointActivateBtn, 1, 1);
+        auto *jb2 = new QHBoxLayout;
+        m_jointEnableBtn = new QPushButton(QStringLiteral("使能"));
+        m_jointEnableBtn->setObjectName("jointEnableBtn");
+        m_jointDisableBtn = new QPushButton(QStringLiteral("去使能"));
+        m_jointDisableBtn->setObjectName("jointDisableBtn");
+        m_jointFaultBtn = new QPushButton(QStringLiteral("故障复位"));
+        m_jointFaultBtn->setObjectName("jointFaultBtn");
+        m_jointRunBtn = new QPushButton(QStringLiteral("启动周期"));
+        m_jointRunBtn->setObjectName("jointRunBtn");
+        jb2->addWidget(m_jointEnableBtn);
+        jb2->addWidget(m_jointDisableBtn);
+        jb2->addWidget(m_jointFaultBtn);
+        jb2->addWidget(m_jointRunBtn);
+        jb2->addStretch();
+        jg->addLayout(jb2, 2, 0, 1, 4);
+        jg->addWidget(new QLabel(QStringLiteral("目标位置(计数):")), 3, 0);
+        m_jointTargetEdit = new QLineEdit(QStringLiteral("0"));
+        m_jointTargetEdit->setObjectName("jointTargetEdit");
+        jg->addWidget(m_jointTargetEdit, 3, 1, 1, 3);
+        m_jointStatusLbl = new QLabel(QStringLiteral("状态：未连接"));
+        m_jointStatusLbl->setObjectName("jointStatusLbl");
+        jg->addWidget(m_jointStatusLbl, 4, 0, 1, 4);
+        lcl->addWidget(jBox);
 
         lcl->addWidget(buildLogGroup(), 1);
         ecroot->addWidget(lcol, 3);
@@ -748,12 +812,13 @@ MainWindow::MainWindow(QWidget *parent)
         // 右列：说明
         auto *rcol = new QGroupBox(QStringLiteral("说明"));
         auto *rv = new QVBoxLayout(rcol);
-        auto *hint = new QLabel(
-            QStringLiteral("EtherCAT 主站（内嵌 SOEM）。\n"
-                           "1) 「刷新」扫描主机网卡；选择后「打开」。\n"
-                           "2) 「扫描从站」枚举从站；「映射」后「启动周期」收发过程数据（显示 WKC）。\n"
-                           "3) 可用 CoE(SDO) 读写对象字典。\n\n"
-                           "运行需安装 Npcap（WinPcap-API 兼容模式）。"));
+        auto *hint = new QLabel(QStringLiteral(
+            "EtherCAT 关节（厂商 joint-sdk，CiA402），上位机统一走该 SDK。\n"
+            "1) 「刷新」列出网卡，选好后点「打开+配置」（写 PDO 分配/DC，进入 SAFE_OP）。\n"
+            "2) 点「激活 (OP)」进入 OPERATIONAL。\n"
+            "3) 「使能」后填「目标位置(计数)」并「启动周期」运行。\n"
+            "4) 对象字典：导入从站 ESI(XML) 后可选对象并「读/写 SDO」。\n\n"
+            "需安装 Npcap（WinPcap-API 兼容模式）并以管理员运行。"));
         hint->setWordWrap(true);
         hint->setAlignment(Qt::AlignTop | Qt::AlignLeft);
         rv->addWidget(hint);
@@ -889,7 +954,12 @@ MainWindow::MainWindow(QWidget *parent)
         auto *crb = new QHBoxLayout;
         m_cbClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
         m_cbClearRxBtn->setObjectName("cbClearRxBtn");
+        auto *ecs_cbExportRxBtn = new QPushButton(QStringLiteral("导出接收"));
+        ecs_cbExportRxBtn->setObjectName(QStringLiteral("cbExportRxBtn"));
+        ecs_cbExportRxBtn->setToolTip(QStringLiteral("导出当前接收区的数据为 CSV/文本"));
+        connect(ecs_cbExportRxBtn, &QPushButton::clicked, this, &MainWindow::onExportRx);
         crb->addWidget(m_cbClearRxBtn);
+        crb->addWidget(ecs_cbExportRxBtn);
         crb->addStretch();
         crv->addLayout(crb);
         { QTableWidget *pt = nullptr;
@@ -909,6 +979,7 @@ MainWindow::MainWindow(QWidget *parent)
         connect(m_cbClearRxBtn, &QPushButton::clicked, this, [this]() {
             if (m_cbRxTable) m_cbRxTable->setRowCount(0);
             if (m_cbScrollTable) m_cbScrollTable->setRowCount(0);
+            m_rxBytes.remove(m_cbRxTable); m_rxBytes.remove(m_cbScrollTable);
             m_cbRxRowById.clear();
             clearParseAreas(); });
         connect(m_cbMasterEdit, &QLineEdit::textChanged, this, [this]() { updateCbPreview(); });
@@ -1048,7 +1119,12 @@ MainWindow::MainWindow(QWidget *parent)
         auto *srb = new QHBoxLayout;
         m_simpleClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
         m_simpleClearRxBtn->setObjectName("simpleClearRxBtn");
+        auto *ecs_simpleExportRxBtn = new QPushButton(QStringLiteral("导出接收"));
+        ecs_simpleExportRxBtn->setObjectName(QStringLiteral("simpleExportRxBtn"));
+        ecs_simpleExportRxBtn->setToolTip(QStringLiteral("导出当前接收区的数据为 CSV/文本"));
+        connect(ecs_simpleExportRxBtn, &QPushButton::clicked, this, &MainWindow::onExportRx);
         srb->addWidget(m_simpleClearRxBtn);
+        srb->addWidget(ecs_simpleExportRxBtn);
         srb->addStretch();
         srv->addLayout(srb);
         { QTableWidget *pt = nullptr;
@@ -1109,6 +1185,19 @@ MainWindow::MainWindow(QWidget *parent)
         m_coParamArea = new QWidget;
         m_coParamArea->setObjectName("coParamArea");
         pv->addWidget(m_coParamArea);
+        // ---- 单条发送（独立控件，与命令列表无关）：发送参数框中当前配置的单条命令 ----
+        {
+            m_coSingleRow = new QWidget;
+            auto *oneLay = new QHBoxLayout(m_coSingleRow);
+            oneLay->setContentsMargins(0, 0, 0, 0);
+            m_coSendSingleBtn = new QPushButton(QStringLiteral("单条发送"));
+            m_coSendSingleBtn->setObjectName("coSendSingleBtn");
+            m_coSendSingleBtn->setToolTip(
+                QStringLiteral("只发送参数框中当前选择的这一条命令（如 RSDO）；与下方命令列表无关"));
+            oneLay->addWidget(m_coSendSingleBtn);
+            oneLay->addStretch();
+            pv->addWidget(m_coSingleRow);
+        }
         // ---- 命令列表（可追加；上半=编辑器，下半=列表）----
         auto *listBox = new QGroupBox(QStringLiteral("命令列表（按顺序发送：↑/↓ 调序，可拖动）"));
         m_coListBox = listBox;
@@ -1125,12 +1214,15 @@ MainWindow::MainWindow(QWidget *parent)
         m_coAddBtn->setObjectName("coAddBtn");
         m_coListClearBtn = new QPushButton(QStringLiteral("清空列表"));
         m_coListClearBtn->setObjectName("coListClearBtn");
+        m_coExportBtn = new QPushButton(QStringLiteral("导出列表记录"));
+        m_coExportBtn->setObjectName("coExportBtn");
+        m_coExportBtn->setToolTip(QStringLiteral("把命令列表记录（帧ID|数据|标准/扩展）弹出到剪切栏窗口，可复制或导出文件"));
         lbtns->addWidget(m_coAddBtn);
         lbtns->addWidget(m_coListClearBtn);
+        lbtns->addWidget(m_coExportBtn);
         lbtns->addStretch();
         lv->addLayout(lbtns);
-        pv->addWidget(listBox);
-        lcl->addWidget(pBox);
+        lcl->addWidget(pBox);   // 参数盒（含单条发送行）；命令列表移出，改与下方用分隔条组合
 
         // ---- 预览 ----
         auto *prBox = new QGroupBox(QStringLiteral("预览（COB-ID / 数据）"));
@@ -1139,11 +1231,11 @@ MainWindow::MainWindow(QWidget *parent)
         m_coPreview->setObjectName("coPreview");
         m_coPreview->setReadOnly(true);
         prv->addWidget(m_coPreview);
-        lcl->addWidget(prBox);
 
         auto *sop = new QHBoxLayout;
         m_coSendBtn = new QPushButton(QStringLiteral("发送"));
         m_coSendBtn->setObjectName("coSendBtn");
+        m_coSendBtn->setToolTip(QStringLiteral("只发送下方命令列表中的全部命令（不含单条命令）"));
         m_coStopBtn = new QPushButton(QStringLiteral("停止"));
         m_coStopBtn->setObjectName("coStopBtn");
         m_coOdBrowserBtn = new QPushButton(QStringLiteral("对象字典…"));
@@ -1158,8 +1250,18 @@ MainWindow::MainWindow(QWidget *parent)
         sop->addWidget(m_coImportEdsBtn);
         sop->addWidget(m_coResetEdsBtn);
         sop->addStretch();
-        lcl->addLayout(sop);
-        lcl->addWidget(buildLogGroup(), 1);
+
+        // 命令列表与下方（预览 / 发送 / 日志）用垂直分隔条分开：可上下拉动调整列表高度，压缩日志
+        {
+            auto *bottomPane = new QWidget;
+            auto *bp = new QVBoxLayout(bottomPane);
+            bp->setContentsMargins(0, 0, 0, 0);
+            bp->setSpacing(6);
+            bp->addWidget(prBox);
+            bp->addLayout(sop);
+            bp->addWidget(buildLogGroup(), 1);
+            lcl->addWidget(makeListLogSplit(listBox, bottomPane), /*stretch*/ 1);
+        }
 
         // ---- 右：接收区（与通用CAN/Simple 一致）----
         auto *rxBox = new QGroupBox(QStringLiteral("接收区"));
@@ -1226,7 +1328,12 @@ MainWindow::MainWindow(QWidget *parent)
         auto *crb = new QHBoxLayout;
         m_coClearRxBtn = new QPushButton(QStringLiteral("清空接收"));
         m_coClearRxBtn->setObjectName("coClearRxBtn");
+        auto *ecs_coExportRxBtn = new QPushButton(QStringLiteral("导出接收"));
+        ecs_coExportRxBtn->setObjectName(QStringLiteral("coExportRxBtn"));
+        ecs_coExportRxBtn->setToolTip(QStringLiteral("导出当前接收区的数据为 CSV/文本"));
+        connect(ecs_coExportRxBtn, &QPushButton::clicked, this, &MainWindow::onExportRx);
         crb->addWidget(m_coClearRxBtn);
+        crb->addWidget(ecs_coExportRxBtn);
         crb->addStretch();
         rv->addLayout(crb);
         { QTableWidget *pt = nullptr;
@@ -1269,12 +1376,14 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onIntervalChanged);
     connect(m_resetBtn, &QPushButton::clicked, this, &MainWindow::onResetList);
     connect(m_exportBtn, &QPushButton::clicked, this, &MainWindow::onExportCsv);
+    connect(m_exportClipBtn, &QPushButton::clicked, this, &MainWindow::onExportListRecords);
     connect(m_importBtn, &QPushButton::clicked, this, &MainWindow::onImportCsv);
     connect(m_clearRxBtn, &QPushButton::clicked, this, &MainWindow::onClearRx);
     connect(m_modeBtn, &QToolButton::clicked, this, [this]() {
         setRxMode(!m_scrollMode);                 // 点击图标切换到另一种模式
     });
-    connect(m_sendBtn,  &QPushButton::clicked, this, &MainWindow::onSend);
+    connect(m_sendSingleBtn, &QPushButton::clicked, this, &MainWindow::onSendSingle);
+    connect(m_sendListBtn,   &QPushButton::clicked, this, &MainWindow::onSendList);
     connect(m_stopBtn,  &QPushButton::clicked, this, &MainWindow::onStop);
     connect(m_statusBtn,&QPushButton::clicked, this, &MainWindow::onQueryStatus);
 
@@ -1297,6 +1406,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_simpleClearRxBtn,  &QPushButton::clicked, this, [this]() {
         if (m_simpleRxTable) m_simpleRxTable->setRowCount(0);
         if (m_simpleScrollTable) m_simpleScrollTable->setRowCount(0);
+        m_rxBytes.remove(m_simpleRxTable); m_rxBytes.remove(m_simpleScrollTable);
         m_simpleRxRowById.clear();
         clearParseAreas();
     });
@@ -1331,6 +1441,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(m_coNodeEdit, &QLineEdit::textChanged, this, [this]() { updateCoPreview(); });
     connect(m_coSendBtn, &QPushButton::clicked, this, &MainWindow::onCoSend);
+    connect(m_coSendSingleBtn, &QPushButton::clicked, this, &MainWindow::onCoSendSingle);
     connect(m_coStopBtn, &QPushButton::clicked, this, &MainWindow::onCoStop);
     connect(m_coOdBrowserBtn, &QPushButton::clicked, this, &MainWindow::onOpenObjectDictionary);
     if (m_coImportEdsBtn) connect(m_coImportEdsBtn, &QPushButton::clicked, this, &MainWindow::onImportEds);
@@ -1338,14 +1449,20 @@ MainWindow::MainWindow(QWidget *parent)
     if (m_coAddBtn)       connect(m_coAddBtn,       &QPushButton::clicked, this, &MainWindow::coAddCurrentToList);
     if (m_coListClearBtn) connect(m_coListClearBtn, &QPushButton::clicked, this, [this]() {
         m_coListModel.clear(); coRebuildListWidget(); updateCoPreview(); });
+    if (m_coExportBtn) connect(m_coExportBtn, &QPushButton::clicked, this, &MainWindow::coExportListRecords);
     if (m_coList) connect(m_coList->model(), &QAbstractItemModel::rowsMoved,
         this, [this]() { coSnapshotCoList(); coRebuildListWidget(); updateCoPreview(); });
     if (m_coList) connect(m_coList, &QListWidget::itemClicked,
         this, [this](QListWidgetItem *it) { coRestoreFromEntry(m_coList->row(it)); });
+    if (m_coList) connect(m_coList, &QListWidget::itemDoubleClicked,
+        this, [this](QListWidgetItem *it) { coEditEntryBytes(m_coList->row(it)); });
+    // 应用级事件过滤：点击列表框以外区域 → 取消选中并恢复为“追加”模式
+    qApp->installEventFilter(this);
     connect(m_coModeBtn, &QToolButton::clicked, this, [this]() { coSetRxMode(!m_coScrollMode); });
     connect(m_coClearRxBtn, &QPushButton::clicked, this, [this]() {
         if (m_coRxTable) m_coRxTable->setRowCount(0);
         if (m_coScrollTable) m_coScrollTable->setRowCount(0);
+        m_rxBytes.remove(m_coRxTable); m_rxBytes.remove(m_coScrollTable);
         m_coRxRowById.clear();
         clearParseAreas();
     });
@@ -1359,6 +1476,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_rs485ClearRxBtn, &QPushButton::clicked, this, [this]() {
         if (m_rs485RxTable) m_rs485RxTable->setRowCount(0);
         if (m_rs485ScrollTable) m_rs485ScrollTable->setRowCount(0);
+        m_rxBytes.remove(m_rs485RxTable); m_rxBytes.remove(m_rs485ScrollTable);
         clearParseAreas();
     });
     connect(m_rs485ModeBtn, &QToolButton::clicked, this, [this]() {
@@ -1374,20 +1492,25 @@ MainWindow::MainWindow(QWidget *parent)
 
     // EtherCAT 页
     connect(m_ecRefreshBtn, &QPushButton::clicked, this, &MainWindow::onEcRefreshAdapters);
-    connect(m_ecOpenBtn,    &QPushButton::clicked, this, &MainWindow::onEcOpenToggle);
-    connect(m_ecScanBtn,    &QPushButton::clicked, this, &MainWindow::onEcScanSlaves);
-    connect(m_ecMapBtn,     &QPushButton::clicked, this, &MainWindow::onEcMap);
-    connect(m_ecRunBtn,     &QPushButton::clicked, this, &MainWindow::onEcRunToggle);
     connect(m_ecSdoReadBtn, &QPushButton::clicked, this, &MainWindow::onEcSdoRead);
     connect(m_ecSdoWriteBtn,&QPushButton::clicked, this, &MainWindow::onEcSdoWrite);
-    m_ecTimer = new QTimer(this);
-    connect(m_ecTimer, &QTimer::timeout, this, [this]() {
-        if (!m_ethercat || !m_ethercat->isOpen()) return;
-        m_ethercat->sendProcessData();
-        const int wkc = m_ethercat->receiveProcessData(2000);
-        if (m_ecWkcLbl)
-            m_ecWkcLbl->setText(QStringLiteral("WKC: %1 / 期望 %2").arg(wkc).arg(m_ethercat->expectedWkc()));
-    });
+    connect(m_ecImportXmlBtn, &QPushButton::clicked, this, &MainWindow::onEcImportXml);
+    connect(m_ecObjBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onEcObjSelected);
+    // 后台工作线程：执行阻塞的 EtherCAT 操作（joint-sdk configure/activate），避免卡死 GUI
+    m_ecJob = new EcJob(this);
+    connect(m_ecJob, &EcJob::jobDone, this, &MainWindow::onEcJobDone);
+
+    // ---- 关节驱动 (joint-sdk) 接线 ----
+    m_joint = new JointController();
+    connect(m_jointOpenBtn, &QPushButton::clicked, this, &MainWindow::onJointOpenConfig);
+    connect(m_jointActivateBtn, &QPushButton::clicked, this, &MainWindow::onJointActivate);
+    connect(m_jointEnableBtn, &QPushButton::clicked, this, &MainWindow::onJointEnable);
+    connect(m_jointDisableBtn, &QPushButton::clicked, this, &MainWindow::onJointDisable);
+    connect(m_jointFaultBtn, &QPushButton::clicked, this, &MainWindow::onJointFaultReset);
+    connect(m_jointRunBtn, &QPushButton::clicked, this, &MainWindow::onJointRunToggle);
+    m_jointTimer = new QTimer(this);
+    connect(m_jointTimer, &QTimer::timeout, this, &MainWindow::jointCycle);
 
     // 空格键：发送发送列表中光标所在行（忽略勾选）
     if (m_table) m_table->installEventFilter(this);
@@ -1399,7 +1522,13 @@ MainWindow::MainWindow(QWidget *parent)
     loadSettings();                               // 恢复上次填写的内容与参数
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+    // 等待可能仍在运行的 EtherCAT 后台任务结束，避免线程仍在访问已析构的对象
+    if (m_ecJob && m_ecJob->isRunning()) { m_ecJob->wait(16000); }
+    if (m_jointTimer) m_jointTimer->stop();
+    delete m_joint; m_joint = nullptr;
+}
 
 // ---------------------------------------------------------------------------
 //  多页面共享的「连接区 / 日志区」
@@ -1463,6 +1592,8 @@ QGroupBox *MainWindow::buildLogGroup()
     auto *log = new QPlainTextEdit;
     log->setReadOnly(true);
     log->setMaximumBlockCount(2000);
+    // 日志最小高度≈一行：配合列表/日志垂直分隔条，拖动时日志最多被压到一行
+    log->setMinimumHeight(log->fontMetrics().height() + 6);
     v->addWidget(log);
 
     if (m_logPanels.isEmpty()) {          // 规范份：沿用既有成员名（log）
@@ -1621,7 +1752,8 @@ void MainWindow::setPortUiEnabled(bool open)
     m_bitrateBox->setEnabled(open);
     m_dataBitrateBox->setEnabled(open);
     m_intervalSpin->setEnabled(open);
-    m_sendBtn->setEnabled(open);
+    m_sendSingleBtn->setEnabled(open);
+    m_sendListBtn->setEnabled(open);
     m_stopBtn->setEnabled(open);
     m_statusBtn->setEnabled(open);
     m_resetBtn->setEnabled(true);   // 列表可离线编辑
@@ -1919,11 +2051,87 @@ void MainWindow::onExportCsv()
     logInfo(QStringLiteral("已导出 %1 条记录到 %2").arg(rows).arg(path));
 }
 
+// 通用发送列表：收集记录（有勾选导勾选，无勾选导全部已填写行）→ 弹出剪切栏窗口
+void MainWindow::onExportListRecords()
+{
+    auto comboData = [&](int row, int col, int def) -> int {
+        auto *w = qobject_cast<QComboBox *>(m_table->cellWidget(row, col));
+        return w ? w->currentData().toInt() : def;
+    };
+    auto rowChecked = [&](int row) {
+        auto *it = m_table->item(row, COL_CHK);
+        return it && it->checkState() == Qt::Checked;
+    };
+
+    bool anyChecked = false;
+    for (int r = 0; r < m_table->rowCount(); r++)
+        if (rowChecked(r)) { anyChecked = true; break; }
+
+    QVector<ClipRecord> recs;
+    for (int r = 0; r < m_table->rowCount(); r++) {
+        if (anyChecked && !rowChecked(r)) continue;      // 有勾选：只导勾选
+        auto *idItem = m_table->item(r, COL_ID);
+        if (!idItem || idItem->text().trimmed().isEmpty()) continue;
+        bool ok = false;
+        const quint32 id = idItem->text().trimmed().toUInt(&ok, 16);
+        if (!ok) continue;
+        const int idType = comboData(r, COL_IDTYPE, 0);
+        const int len    = comboData(r, COL_LEN, 8);
+        const int ftype  = comboData(r, COL_FRAMETYPE, FT_CLASSIC);
+        auto *dataItem = m_table->item(r, COL_DATA);
+        QByteArray data = QByteArray::fromHex(
+            QString(dataItem ? dataItem->text() : QString())
+                .remove(QLatin1Char(' ')).remove(QLatin1Char(':')).toLatin1());
+        if (data.size() > len) data.truncate(len);
+
+        ClipRecord rec;
+        rec.id = id;
+        rec.extended = (idType == 1);
+        rec.fd  = (ftype != FT_CLASSIC);
+        rec.brs = (ftype == FT_FD_BRS);
+        rec.data = data;
+        recs.append(rec);
+    }
+
+    if (recs.isEmpty()) {
+        logWarn(QStringLiteral("没有可导出的列表记录（请填写 ID，或先勾选要导出的行）。"));
+        return;
+    }
+    CommandClipboardDialog dlg(recs, this);
+    dlg.exec();
+}
+
+// CANopen 命令列表：收集各条命令的帧 → 弹出剪切栏窗口
+void MainWindow::coExportListRecords()
+{
+    QVector<ClipRecord> recs;
+    for (const CoListEntry &e : m_coListModel) {
+        for (const QByteArray &f : e.frames) {
+            proto::RxFrame rx;
+            if (!proto::decodeDataFrame(f, &rx)) continue;
+            ClipRecord rec;
+            rec.id = rx.id;
+            rec.extended = rx.ext;
+            rec.fd  = rx.fd;
+            rec.brs = rx.brs;
+            rec.data = rx.data;
+            recs.append(rec);
+        }
+    }
+    if (recs.isEmpty()) {
+        logWarn(QStringLiteral("命令列表为空，无可导出的记录。"));
+        return;
+    }
+    CommandClipboardDialog dlg(recs, this);
+    dlg.exec();
+}
+
 void MainWindow::onClearRx()
 {
     m_rxTable->setRowCount(0);          // 静止：就地更新表
     m_rxRowById.clear();
     if (m_scrollTable) m_scrollTable->setRowCount(0);   // 滚动：滚动表
+    m_rxBytes.remove(m_rxTable); m_rxBytes.remove(m_scrollTable);
     clearParseAreas();                  // 同时清空解析区
 }
 
@@ -1962,6 +2170,7 @@ void MainWindow::feedRx(const proto::RxFrame &f)
     int count = m_rxTable->item(row, RX_COUNT)->text().toInt() + 1;
 
     // 就地更新该行（不新增、不滚动）
+    const qint64 oldB = rxRowBytes(m_rxTable, row);
     m_rxTable->item(row, RX_ID)->setText(
         QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
     m_rxTable->item(row, RX_TYPE)->setText(rxTypeText(f));
@@ -1969,7 +2178,9 @@ void MainWindow::feedRx(const proto::RxFrame &f)
     m_rxTable->item(row, RX_DATA)->setText(
         QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_rxTable->item(row, RX_COUNT)->setText(QString::number(count));
+    m_rxBytes[m_rxTable] += rxRowBytes(m_rxTable, row) - oldB;
     appendScroll(QStringLiteral("RX"), f);            // 收一条
+    capIndexedRows(m_rxTable, m_rxRowById);           // 最多 100 条，超出丢弃最旧
     applyRxFilter(m_rxTable);                         // 筛选随新行刷新
 }
 
@@ -1987,40 +2198,36 @@ QString MainWindow::rxCellText(int row, int col) const
 }
 
 // ---------------------------------------------------------------------------
-//  收集有效载荷
+//  收集有效载荷（拆分为单条 / 列表两条路径）
 // ---------------------------------------------------------------------------
-MainWindow::Payload MainWindow::collectPayload(QString *info) const
+MainWindow::Payload MainWindow::buildPayloadSingle(QString *info) const
 {
     Payload p;
+    p.isList = false;
+    QString err;
+    QByteArray f = buildSingleFrame(&err);
+    if (!f.isEmpty()) p.frames.append(f);
+    if (info) *info = QStringLiteral("单条发送：来自单帧编辑区");
+    return p;
+}
+
+MainWindow::Payload MainWindow::buildPayloadList(QString *info) const
+{
+    Payload p;
+    p.isList = true;
     QVector<int> checked;
     for (int r = 0; r < m_table->rowCount(); r++) {
         auto *it = m_table->item(r, COL_CHK);
         if (it && it->checkState() == Qt::Checked)
             checked.append(r);
     }
-
-    if (checked.size() >= 2) {
-        p.isList = true;
-        for (int r : checked) {
-            QString err;
-            QByteArray f = buildRowFrame(r, &err);
-            if (!f.isEmpty()) p.frames.append(f);
-        }
-        if (info) *info = QStringLiteral("列表发送：勾选 %1 行，打包 %2 帧")
-                              .arg(checked.size()).arg(p.frames.size());
-    } else if (checked.size() == 1) {
-        p.isList = false;
+    for (int r : checked) {
         QString err;
-        QByteArray f = buildRowFrame(checked.first(), &err);
+        QByteArray f = buildRowFrame(r, &err);
         if (!f.isEmpty()) p.frames.append(f);
-        if (info) *info = QStringLiteral("单帧发送：来自第 %1 行").arg(checked.first() + 1);
-    } else {
-        p.isList = false;
-        QString err;
-        QByteArray f = buildSingleFrame(&err);
-        if (!f.isEmpty()) p.frames.append(f);
-        if (info) *info = QStringLiteral("单帧发送：来自编辑区");
     }
+    if (info) *info = QStringLiteral("列表发送：勾选 %1 行，打包 %2 帧")
+                          .arg(checked.size()).arg(p.frames.size());
     return p;
 }
 
@@ -2067,16 +2274,39 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *ev)
             return true;   // 吞掉空格，避免触发列表内的其它默认行为
         }
     }
+    // 点击「命令列表」以外的区域：取消选中，并把“更新选中项”恢复为“追加到列表”
+    if (ev->type() == QEvent::MouseButtonPress && m_coList && m_coList->isVisible()) {
+        auto *me = static_cast<QMouseEvent *>(ev);
+        QWidget *w = QApplication::widgetAt(me->globalPosition().toPoint());
+        bool inside = false;
+        for (QWidget *p = w; p; p = p->parentWidget())
+            if (p == m_coList) { inside = true; break; }
+        if (!inside && (m_coList->currentRow() >= 0 || m_coEditRow >= 0)) {
+            m_coList->setCurrentRow(-1);
+            m_coList->clearSelection();
+            m_coEditRow = -1;
+            if (m_coAddBtn) m_coAddBtn->setText(QStringLiteral("＋ 追加到列表"));
+        }
+    }
     return QMainWindow::eventFilter(obj, ev);
 }
 
-void MainWindow::onSend()
+void MainWindow::onSendSingle()
 {
     if (!m_link->isOpen()) {
         logWarn(QStringLiteral("串口未打开。"));
         return;
     }
-    doSend();
+    doSendSingle();
+}
+
+void MainWindow::onSendList()
+{
+    if (!m_link->isOpen()) {
+        logWarn(QStringLiteral("串口未打开。"));
+        return;
+    }
+    doSendList();
 }
 
 // 统一发送：模式未变不发 SET_MODE，数据未变不发数据帧，总是发 TX_START。
@@ -2108,13 +2338,12 @@ void MainWindow::sendCachedFrames(bool listMode, const QVector<QByteArray> &fram
                  QStringLiteral("触发发送 (%1)").arg(trig ? "连续" : "单次"));
 }
 
-QString MainWindow::doSend()
+QString MainWindow::sendPayload(const Payload &p, const QString &info)
 {
-    QString info;
-    Payload p = collectPayload(&info);
-
     if (p.empty()) {
-        logWarn(QStringLiteral("无可发送数据（编辑区为空且未勾选任何行）。"));
+        logWarn(QStringLiteral("无可发送数据（%1）。")
+                    .arg(p.isList ? QStringLiteral("请先在发送列表勾选要发送的行")
+                                  : QStringLiteral("单帧编辑区为空或格式无效")));
         return QStringLiteral("empty; changed=0 ptrig=0");
     }
 
@@ -2135,6 +2364,20 @@ QString MainWindow::doSend()
 
     return QStringLiteral("%1; changed=%2 ptrig=%3")
         .arg(info).arg(changed ? 1 : 0).arg(trig ? 1 : 0);
+}
+
+QString MainWindow::doSendSingle()
+{
+    QString info;
+    Payload p = buildPayloadSingle(&info);
+    return sendPayload(p, info);
+}
+
+QString MainWindow::doSendList()
+{
+    QString info;
+    Payload p = buildPayloadList(&info);
+    return sendPayload(p, info);
 }
 
 void MainWindow::onStop()
@@ -2173,119 +2416,252 @@ void MainWindow::onEcRefreshAdapters()
 
 void MainWindow::onEcSdoRead()
 {
-    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
-    const int slave = m_ecSlaveSpin->value();
+    if (!m_joint || !m_joint->isOpen()) { logWarn(QStringLiteral("请先「打开+配置」关节。")); return; }
     const quint16 index = (quint16)m_ecIndexEdit->text().toUInt(nullptr, 0);
     const quint8 sub = (quint8)m_ecSubEdit->text().toUInt(nullptr, 0);
     QByteArray data; QString err;
-    if (!m_ethercat->sdoRead(slave, index, sub, &data, &err)) {
+    if (!m_joint->sdoRead(index, sub, &data, &err)) {
         if (m_ecSdoResultLbl) m_ecSdoResultLbl->setText(QStringLiteral("读失败：%1").arg(err));
-        logError(QStringLiteral("EtherCAT SDO 读失败：%1").arg(err));
+        logError(QStringLiteral("SDO 读失败：%1").arg(err));
         return;
     }
     const QString hex = QString::fromLatin1(data.toHex(' ').toUpper());
     if (m_ecSdoResultLbl)
         m_ecSdoResultLbl->setText(QStringLiteral("读 0x%1:%2 (%3B) = %4")
                                       .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(data.size()).arg(hex));
-    logInfo(QStringLiteral("EtherCAT SDO 读 0x%1:%2 = %3")
-                .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
+    logInfo(QStringLiteral("SDO 读 0x%1:%2 = %3").arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
 }
 
 void MainWindow::onEcSdoWrite()
 {
-    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
-    const int slave = m_ecSlaveSpin->value();
+    if (!m_joint || !m_joint->isOpen()) { logWarn(QStringLiteral("请先「打开+配置」关节。")); return; }
     const quint16 index = (quint16)m_ecIndexEdit->text().toUInt(nullptr, 0);
     const quint8 sub = (quint8)m_ecSubEdit->text().toUInt(nullptr, 0);
     const QByteArray data = QByteArray::fromHex(m_ecValEdit->text().toLatin1());
     QString err;
-    if (!m_ethercat->sdoWrite(slave, index, sub, data, &err)) {
+    if (!m_joint->sdoWrite(index, sub, data, &err)) {
         if (m_ecSdoResultLbl) m_ecSdoResultLbl->setText(QStringLiteral("写失败：%1").arg(err));
-        logError(QStringLiteral("EtherCAT SDO 写失败：%1").arg(err));
+        logError(QStringLiteral("SDO 写失败：%1").arg(err));
         return;
     }
     const QString hex = QString::fromLatin1(data.toHex(' ').toUpper());
     if (m_ecSdoResultLbl)
         m_ecSdoResultLbl->setText(QStringLiteral("写 0x%1:%2 = %3 成功")
                                       .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
-    logInfo(QStringLiteral("EtherCAT SDO 写 0x%1:%2 = %3 成功")
-                .arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
+    logInfo(QStringLiteral("SDO 写 0x%1:%2 = %3 成功").arg(index, 4, 16, QLatin1Char('0')).arg(sub).arg(hex));
 }
 
-void MainWindow::onEcScanSlaves()
+// 请求切换到 OP（按规范：先 SAFE-OP 再 OP，切换期间持续收发过程数据）
+
+// 周期过程数据循环：发送前把控制字写入 RxPDO（按上一帧状态字推进 DS402 状态机）
+
+// ---- EtherCAT 后台任务：把阻塞的 SOEM 调用移出 GUI 线程 ----
+void MainWindow::setEcBusy(bool busy)
 {
-    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
-    const int n = m_ethercat->scanSlaves();
-    if (m_ecSlaveTable) {
-        m_ecSlaveTable->setRowCount(0);
-        for (int i = 1; i <= n; ++i) {
-            const EcSlaveInfo s = m_ethercat->slave(i);
-            const int r = m_ecSlaveTable->rowCount();
-            m_ecSlaveTable->insertRow(r);
-            auto set = [&](int c, const QString &t) {
-                auto *it = new QTableWidgetItem(t);
-                it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-                m_ecSlaveTable->setItem(r, c, it);
-            };
-            set(0, QString::number(s.pos));
-            set(1, s.name);
-            set(2, EtherCatLink::stateName(s.state));
-            set(3, QStringLiteral("0x%1").arg(s.alStatus, 4, 16, QLatin1Char('0')).toUpper());
-            set(4, QStringLiteral("0x%1").arg(s.configAddr, 4, 16, QLatin1Char('0')).toUpper());
-            set(5, QStringLiteral("0x%1").arg(s.vendorId, 8, 16, QLatin1Char('0')).toUpper());
-            set(6, QStringLiteral("0x%1").arg(s.productId, 8, 16, QLatin1Char('0')).toUpper());
+    m_ecBusy = busy;
+    const bool en = !busy;
+    for (QPushButton *b : { m_ecRefreshBtn, m_ecSdoReadBtn, m_ecSdoWriteBtn, m_ecImportXmlBtn,
+                            m_jointOpenBtn, m_jointActivateBtn, m_jointEnableBtn,
+                            m_jointDisableBtn, m_jointFaultBtn, m_jointRunBtn }) {
+        if (b) b->setEnabled(en);
+    }
+    if (m_ecStatusLbl && busy) m_ecStatusLbl->setText(QStringLiteral("EtherCAT：后台操作中…"));
+}
+
+void MainWindow::startEcJob(std::function<QPair<bool, QString>()> fn, const QString &busyLog)
+{
+    if (m_ecBusy) { logWarn(QStringLiteral("上一个 EtherCAT 操作尚未完成，请稍候。")); return; }
+    setEcBusy(true);
+    // 后台任务运行期间停掉周期，避免与任务并发访问 SOEM 上下文
+    if (m_jointTimer) m_jointTimer->stop();
+    if (m_jointRunBtn) m_jointRunBtn->setText(QStringLiteral("启动周期"));
+    if (!busyLog.isEmpty()) logInfo(busyLog);
+    m_ecJob->runJob(std::move(fn));
+}
+
+void MainWindow::onEcJobDone(bool ok, const QString &msg)
+{
+    setEcBusy(false);
+    if (!msg.isEmpty()) { if (ok) logInfo(msg); else logWarn(msg); }
+    if (m_ecStatusLbl && m_joint && m_joint->isOpen())
+        m_ecStatusLbl->setText(m_joint->isOperational() ? QStringLiteral("关节：OPERATIONAL")
+                                                        : QStringLiteral("关节：已配置（SAFE_OP）"));
+    // 关节：激活成功 → 自动启动周期
+    if (m_jointStartAfterJob) {
+        m_jointStartAfterJob = false;
+        if (m_jointTimer && m_joint && m_joint->isOpen() && !m_jointTimer->isActive()) {
+            m_jointTimer->start(1);
+            if (m_jointRunBtn) m_jointRunBtn->setText(QStringLiteral("停止周期"));
         }
     }
-    logInfo(QStringLiteral("EtherCAT：发现 %1 个从站。").arg(n));
 }
 
-void MainWindow::onEcMap()
+// 接收后读取 TxPDO 状态字（0x6041）并刷新状态标签
+
+// CiA402 伺服使能：解析 PDO 映射 → 设操作模式 0x6060 → 切 OP → 周期写控制字
+// （PDO 解析/模式写入/OP 切换均为阻塞 SDO/网络调用，放在工作线程执行）
+
+// 去使能：写 Shutdown（0x0006）
+
+// 故障复位：写 0x0080
+
+// ---- ESI XML 对象字典 ----
+void MainWindow::onEcImportXml()
 {
-    if (!m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
-    if (!m_ethercat->mapProcessData()) { logWarn(QStringLiteral("映射失败（请先扫描从站）。")); return; }
-    logInfo(QStringLiteral("EtherCAT：过程数据已映射，IOmap %1 字节，期望 WKC=%2。")
-                .arg(m_ethercat->ioMap().size()).arg(m_ethercat->expectedWkc()));
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入 EtherCAT ESI/XML"), QString(),
+        QStringLiteral("EtherCAT XML (*.xml *.esi *.eni);;所有文件 (*)"));
+    if (path.isEmpty()) return;
+
+    EsiXmlData data;
+    QString err;
+    if (!loadEsiXml(path, &data, &err)) {
+        logError(QStringLiteral("导入 XML 失败：%1").arg(err));
+        if (m_ecXmlLabel) m_ecXmlLabel->setText(QStringLiteral("导入失败"));
+        return;
+    }
+    m_esi = data;
+    m_esiPath = path;
+
+    // 填充对象下拉（对象索引:子索引 + 名称）
+    if (m_ecObjBox) {
+        m_ecObjBox->blockSignals(true);
+        m_ecObjBox->clear();
+        m_ecObjBox->addItem(QStringLiteral("（选择对象填入索引/子索引）"), QVariant());
+        for (const EsiObjEntry &e : m_esi.objects) {
+            const QString label = QStringLiteral("0x%1:%2  %3")
+                                      .arg(e.index, 4, 16, QLatin1Char('0')).arg(e.sub)
+                                      .arg(e.name);
+            m_ecObjBox->addItem(label, (uint)(((uint)e.index << 8) | e.sub));
+        }
+        m_ecObjBox->blockSignals(false);
+    }
+    if (m_ecXmlLabel)
+        m_ecXmlLabel->setText(QStringLiteral("%1：%2 个对象，RxPDO %3 / TxPDO %4；控制字偏移 %5，状态字偏移 %6")
+                                  .arg(QFileInfo(path).fileName())
+                                  .arg(m_esi.objects.size())
+                                  .arg(m_esi.rxPdos.size()).arg(m_esi.txPdos.size())
+                                  .arg(m_esi.controlwordByteOffset()).arg(m_esi.statuswordByteOffset()));
+    logInfo(QStringLiteral("已导入 XML：%1（%2 个对象，RxPDO %3 / TxPDO %4）")
+                .arg(QFileInfo(path).fileName()).arg(m_esi.objects.size())
+                .arg(m_esi.rxPdos.size()).arg(m_esi.txPdos.size()));
 }
 
-void MainWindow::onEcRunToggle()
+// 选中对象 → 填入 CoE 索引/子索引（SDO 操作的对象即来自上传的 XML）
+void MainWindow::onEcObjSelected(int idx)
 {
-    if (!m_ecTimer || !m_ethercat || !m_ethercat->isOpen()) { logWarn(QStringLiteral("请先打开网卡。")); return; }
-    if (m_ecTimer->isActive()) {
-        m_ecTimer->stop();
-        m_ecRunBtn->setText(QStringLiteral("启动周期"));
-        logInfo(QStringLiteral("EtherCAT：已停止周期过程数据。"));
+    if (!m_ecObjBox || idx <= 0) return;
+    const QVariant v = m_ecObjBox->itemData(idx);
+    if (!v.isValid()) return;
+    const uint packed = v.toUInt();
+    const quint16 index = (quint16)(packed >> 8);
+    const quint8  sub   = (quint8)(packed & 0xFF);
+    if (m_ecIndexEdit) m_ecIndexEdit->setText(QStringLiteral("0x%1").arg(index, 4, 16, QLatin1Char('0')));
+    if (m_ecSubEdit)   m_ecSubEdit->setText(QString::number(sub));
+    // 若对象带默认值，顺带填入值框，便于直接写
+    if (const EsiObjEntry *e = m_esi.findObject(index, sub))
+        if (m_ecValEdit && !e->def.isEmpty())
+            m_ecValEdit->setText(QString::fromLatin1(e->def.toHex(' ').toUpper()));
+}
+
+// 从站 PDO 分配为空时，按已导入 ESI 写入 0x1C12/0x1C13（含映射项，除非 Fixed）。
+// 仅在工作线程调用（内部为阻塞 SDO）。返回是否发生写入。
+
+// ---- 关节驱动 (joint-sdk)：打开+配置 / 激活 / 使能 / 周期 ----
+void MainWindow::onJointOpenConfig()
+{
+    if (!m_joint) return;
+    if (!m_ecAdapterBox || m_ecAdapterBox->currentIndex() < 0) {
+        logWarn(QStringLiteral("请先在「连接（EtherCAT 主站 / 网卡）」里刷新并选择网卡。"));
+        return;
+    }
+    const QString ifname = m_ecAdapterBox->currentData().toString();
+    const int pos = m_jointPosSpin ? m_jointPosSpin->value() : 1;
+    const QString esi = m_esiPath;   // 已导入 ESI 则用，否则内置 CyberBeast profile
+    startEcJob([this, ifname, pos, esi]() -> QPair<bool, QString> {
+        QString err;
+        if (!m_joint->open(ifname, pos, esi, &err))
+            return { false, QStringLiteral("关节打开失败：%1").arg(err) };
+        if (!m_joint->configure(&err))
+            return { false, QStringLiteral("关节配置失败：%1").arg(err) };
+        return { true, QStringLiteral("关节已打开并配置（SAFE_OP）。") };
+    }, QStringLiteral("关节：正在打开并配置（后台执行）…"));
+}
+
+void MainWindow::onJointActivate()
+{
+    if (!m_joint || !m_joint->isOpen()) { logWarn(QStringLiteral("请先「打开+配置」。")); return; }
+    startEcJob([this]() -> QPair<bool, QString> {
+        QString err;
+        if (!m_joint->activate(&err))
+            return { false, QStringLiteral("激活(OP)失败：%1").arg(err) };
+        m_jointStartAfterJob = true;
+        return { true, QStringLiteral("关节已激活（OPERATIONAL）。") };
+    }, QStringLiteral("关节：正在激活 OP（后台执行）…"));
+}
+
+void MainWindow::onJointEnable()
+{
+    if (!m_joint || !m_joint->isOpen()) { logWarn(QStringLiteral("请先打开+配置+激活。")); return; }
+    const int mode = m_jointModeBox ? m_jointModeBox->currentData().toInt() : 8;
+    QString err;
+    m_joint->enable(mode, &err);
+    if (m_jointTargetEdit) m_joint->setTargetPosition(m_jointTargetEdit->text().toInt());
+    if (m_jointTimer && !m_jointTimer->isActive()) {
+        m_jointTimer->start(1);
+        if (m_jointRunBtn) m_jointRunBtn->setText(QStringLiteral("停止周期"));
+    }
+    logInfo(QStringLiteral("关节：已请求使能（模式 %1）。").arg(mode));
+}
+
+void MainWindow::onJointDisable()
+{
+    if (!m_joint) return;
+    m_joint->disable();
+    logInfo(QStringLiteral("关节：已请求去使能。"));
+}
+
+void MainWindow::onJointFaultReset()
+{
+    if (!m_joint) return;
+    m_joint->faultReset();
+    logInfo(QStringLiteral("关节：已请求故障复位。"));
+}
+
+void MainWindow::onJointRunToggle()
+{
+    if (!m_joint || !m_joint->isOpen()) { logWarn(QStringLiteral("请先打开+配置+激活。")); return; }
+    if (m_jointTimer->isActive()) {
+        m_jointTimer->stop();
+        if (m_jointRunBtn) m_jointRunBtn->setText(QStringLiteral("启动周期"));
+        logInfo(QStringLiteral("关节：已停止周期。"));
     } else {
-        m_ecTimer->start(5);
-        m_ecRunBtn->setText(QStringLiteral("停止周期"));
-        logInfo(QStringLiteral("EtherCAT：已启动周期过程数据（5ms）。"));
+        if (m_jointTargetEdit) m_joint->setTargetPosition(m_jointTargetEdit->text().toInt());
+        m_jointTimer->start(1);
+        if (m_jointRunBtn) m_jointRunBtn->setText(QStringLiteral("停止周期"));
+        logInfo(QStringLiteral("关节：已启动周期（~1ms）。"));
     }
 }
 
-void MainWindow::onEcOpenToggle()
+void MainWindow::jointCycle()
 {
-    if (!m_ethercat) return;
-    if (m_ethercat->isOpen()) {
-        if (m_ecTimer) m_ecTimer->stop();
-        if (m_ecRunBtn) m_ecRunBtn->setText(QStringLiteral("启动周期"));
-        m_ethercat->close();
-        m_ecOpenBtn->setText(QStringLiteral("打开"));
-        if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("未连接"));
-        logInfo(QStringLiteral("EtherCAT：已关闭。"));
-        return;
+    if (!m_joint || !m_joint->isOpen()) return;
+    if (m_jointTargetEdit) m_joint->setTargetPosition(m_jointTargetEdit->text().toInt());
+    m_joint->cycleStep();
+    if (m_jointStatusLbl) {
+        m_jointStatusLbl->setText(
+            QStringLiteral("状态字 0x%1 模式 %2 位置 %3 online=%4 OP=%5 WKC=%6")
+                .arg(m_joint->statusword(), 4, 16, QLatin1Char('0'))
+                .arg(m_joint->modeDisplay()).arg(m_joint->actualPosition())
+                .arg(m_joint->feedbackOnline() ? 1 : 0)
+                .arg(m_joint->feedbackOperational() ? 1 : 0)
+                .arg(m_joint->lastWkc()));
     }
-    if (m_ecAdapterBox->currentIndex() < 0) {
-        logWarn(QStringLiteral("请先选择网卡（点「刷新」扫描）。"));
-        return;
-    }
-    const QString name = m_ecAdapterBox->currentData().toString();
-    if (!m_ethercat->open(name)) {
-        if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("打开失败"));
-        return;
-    }
-    m_ecOpenBtn->setText(QStringLiteral("关闭"));
-    if (m_ecStatusLbl) m_ecStatusLbl->setText(QStringLiteral("已打开：%1").arg(m_ecAdapterBox->currentText()));
-    logInfo(QStringLiteral("EtherCAT：已打开网卡 %1。").arg(m_ecAdapterBox->currentText()));
 }
+
+
+
+
 
 void MainWindow::setWorkMode(int mode)
 {
@@ -2620,13 +2996,16 @@ void MainWindow::simpleFeedRx(const proto::RxFrame &f)
         m_simpleRxRowById.insert(f.id, row);
     }
     const int count = m_simpleRxTable->item(row, RX_COUNT)->text().toInt() + 1;
+    const qint64 oldB = rxRowBytes(m_simpleRxTable, row);
     m_simpleRxTable->item(row, RX_ID)->setText(
         QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
     m_simpleRxTable->item(row, RX_TYPE)->setText(rxTypeText(f));
     m_simpleRxTable->item(row, RX_LEN)->setText(QString::number(f.data.size()));
     m_simpleRxTable->item(row, RX_DATA)->setText(QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_simpleRxTable->item(row, RX_COUNT)->setText(QString::number(count));
+    m_rxBytes[m_simpleRxTable] += rxRowBytes(m_simpleRxTable, row) - oldB;
     simpleAppendScroll(QStringLiteral("RX"), f);
+    capIndexedRows(m_simpleRxTable, m_simpleRxRowById);
     applyRxFilter(m_simpleRxTable);
 }
 
@@ -2650,7 +3029,8 @@ void MainWindow::simpleAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    enforceScrollCap(m_simpleScrollTable, row, f.data.size());
+    rxAddRowBytes(m_simpleScrollTable, row);
+    capScrollRows(m_simpleScrollTable);
     applyRxFilter(m_simpleScrollTable);
     if (follow) m_simpleScrollTable->scrollToBottom();
 }
@@ -2701,6 +3081,7 @@ void MainWindow::rebuildCoParams()
     m_coExUnitBoxes.clear();
     m_coMapPdoBox = nullptr; m_coMapObjBoxes.clear(); m_coMapAddBtn = nullptr;
     if (m_coListBox) m_coListBox->setVisible(curCoExample() < 0);   // 实战示例不显示命令列表
+    if (m_coSingleRow) m_coSingleRow->setVisible(curCoExample() < 0);  // 单条发送=非实战内容
     auto *g = new QGridLayout(m_coParamArea);
     const int ex = curCoExample();
     if (ex >= 0 && ex < canopen::examples().size()) {
@@ -2879,8 +3260,9 @@ void MainWindow::rebuildCoParams()
         connect(m_coSdoOpBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this, setEn](int) { setEn(); updateCoPreview(); });
         connect(m_coSdoIdxBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, [this](int) { updateCoPreview(); });
+                this, [this, setEn](int) { coUpdateSdoOpAvail(); setEn(); updateCoPreview(); });
         connect(m_coSdoValueEdit, &QLineEdit::textChanged, this, [this]() { updateCoPreview(); });
+        coUpdateSdoOpAvail();   // 按选中对象的 EDS 访问类型约束 读/写
         setEn();
     } else {
         // RPDO / TPDO：**索引不可选**——仅按默认映射显示对象（只读），数值可填；
@@ -3128,6 +3510,39 @@ void MainWindow::coAddCurrentToList()
     updateCoPreview();
 }
 
+// 双击列表项：手动编辑该命令的字节内容（帧ID / 数据 hex）
+void MainWindow::coEditEntryBytes(int row)
+{
+    if (row < 0 || row >= m_coListModel.size()) return;
+    CoListEntry &e = m_coListModel[row];
+
+    CommandEditDialog dlg(e.frames, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QVector<QByteArray> edited = dlg.frames();
+    if (edited.isEmpty()) { logWarn(QStringLiteral("编辑结果为空，已忽略。")); return; }
+    e.frames = edited;
+
+    // 重建标签：保留原功能名前缀，按新字节显示
+    QString fnName = e.label;
+    int cut = fnName.indexOf(QStringLiteral(" ID="));
+    const int cut2 = fnName.indexOf(QStringLiteral("（"));
+    if (cut < 0) cut = cut2; else if (cut2 >= 0) cut = qMin(cut, cut2);
+    if (cut > 0) fnName = fnName.left(cut);
+    if (e.frames.size() == 1) {
+        proto::RxFrame rx;
+        if (proto::decodeDataFrame(e.frames.first(), &rx))
+            e.label = QStringLiteral("%1 ID=0x%2 DATA=%3")
+                          .arg(fnName,
+                               QString::number(rx.id, 16).toUpper().rightJustified(3, QLatin1Char('0')),
+                               QString::fromLatin1(rx.data.toHex(' ').toUpper()));
+    } else {
+        e.label = QStringLiteral("%1（%2 帧·已编辑）").arg(fnName).arg(e.frames.size());
+    }
+    coRebuildListWidget();
+    updateCoPreview();
+    logInfo(QStringLiteral("已编辑命令列表第 %1 项").arg(row + 1));
+}
+
 // 点击列表项：把该命令回填到编辑器（供再次修改；再次「更新」将覆盖该项）
 void MainWindow::coRestoreFromEntry(int row)
 {
@@ -3158,6 +3573,7 @@ void MainWindow::coRestoreFromEntry(int row)
         }
         if (m_coSdoValueEdit && e.pv.size() > 3)
             m_coSdoValueEdit->setText(QString::number(e.pv.at(3)));
+        coUpdateSdoOpAvail();   // 按该对象的 EDS 访问类型约束 读/写（若存储的 op 不可用则切换）
     } else if (fn == (int)canopen::F_NMT) {
         if (m_coNmtCmdBox && !e.pv.isEmpty()) {
             int i = m_coNmtCmdBox->findData((int)e.pv.at(0)); if (i >= 0) m_coNmtCmdBox->setCurrentIndex(i);
@@ -3345,6 +3761,61 @@ void MainWindow::updateCoPreview()
         .arg(frames.size()).arg(parts.join(QStringLiteral("  →  "))));
 }
 
+// 按选中对象在 EDS 中的访问类型(ro/rw/wo/const)约束 SDO 读/写选项：
+//   ro/const：禁用「写」；wo：禁用「读」；rw/未知：都可用。当前选中项若被禁用则切到可用项。
+void MainWindow::coUpdateSdoOpAvail()
+{
+    if (!m_coSdoOpBox || !m_coSdoIdxBox) return;
+    const uint packed = m_coSdoIdxBox->currentData().toUInt();
+    const quint16 idx = (packed >> 8) & 0xFFFF;
+    const int sub = packed & 0xFF;
+    const canopen::OdEntry *od = canopen::findOd(idx, sub);
+    const QString acc = od ? od->access.trimmed().toLower() : QString();
+    const bool canWrite = (acc != QLatin1String("ro") && acc != QLatin1String("const"));  // rw/wo/未知 → 可写
+    const bool canRead  = (acc != QLatin1String("wo"));                                    // rw/ro/未知 → 可读
+
+    auto *model = qobject_cast<QStandardItemModel *>(m_coSdoOpBox->model());
+    auto setEnabled = [model](int i, bool en) {
+        if (model && i >= 0 && i < model->rowCount() && model->item(i))
+            model->item(i)->setEnabled(en);
+    };
+    setEnabled(0, canWrite);   // 「写 (download)」
+    setEnabled(1, canRead);    // 「读 (upload)」
+
+    const int cur = m_coSdoOpBox->currentIndex();
+    if (cur == 0 && !canWrite && canRead)       m_coSdoOpBox->setCurrentIndex(1);   // 只读 → 切到「读」
+    else if (cur == 1 && !canRead && canWrite)  m_coSdoOpBox->setCurrentIndex(0);   // 只写 → 切到「写」
+}
+
+void MainWindow::onCoSendSingle()
+{
+    if (!m_link || !m_link->isOpen()) { logWarn(QStringLiteral("串口未打开。")); return; }
+
+    QString what;
+    const QVector<QByteArray> frames = coSingleCommandFrames(&what);
+    if (frames.isEmpty()) {
+        logWarn(QStringLiteral("无可发送的单条命令（请先在功能/参数框中选择命令）。"));
+        return;
+    }
+
+    sendCachedFrames(false, frames, 0u);             // 单条命令：单帧模式
+    flushTx(QStringLiteral("CANopen 单条发送"));
+    for (const QByteArray &f : frames) {
+        proto::RxFrame rx;
+        if (proto::decodeDataFrame(f, &rx)) coAppendScroll(QStringLiteral("TX"), rx);
+    }
+    logInfo(QStringLiteral("已发送单条命令：%1（%2 帧）").arg(what).arg(frames.size()));
+}
+
+// 单条发送取用的帧：始终取参数框（功能下拉+参数）当前配置的这一条命令，
+// 与命令列表内容无关（不读取列表、也不发送列表内容）。
+QVector<QByteArray> MainWindow::coSingleCommandFrames(QString *what) const
+{
+    if (what) *what = m_coFuncBox ? m_coFuncBox->currentText() : QString();
+    QString err;
+    return buildCoFrames(&err);
+}
+
 void MainWindow::onCoSend()
 {
     if (!m_link || !m_link->isOpen()) { logWarn(QStringLiteral("串口未打开。")); return; }
@@ -3365,7 +3836,7 @@ void MainWindow::onCoSend()
             coSyncTransmitFromMapping();
         return;
     }
-    // 命令列表非空：按列表顺序依次发送全部帧
+    // 命令列表非空：按列表顺序依次发送全部帧（下方「发送」只负责命令列表）
     if (!m_coListModel.isEmpty()) {
         QVector<QByteArray> all;
         for (const CoListEntry &e : m_coListModel)
@@ -3380,18 +3851,8 @@ void MainWindow::onCoSend()
                     .arg(m_coListModel.size()).arg(all.size()));
         return;
     }
-    QString err;
-    const QVector<QByteArray> frames = buildCoFrames(&err);
-    if (frames.isEmpty()) { logWarn(QStringLiteral("无法发送：%1").arg(err)); return; }
-
-    sendCachedFrames(false, frames, 0u);             // 普通功能：单帧
-    flushTx(QStringLiteral("CANopen 发送"));
-    for (const QByteArray &f : frames) {
-        proto::RxFrame rx;
-        if (proto::decodeDataFrame(f, &rx)) coAppendScroll(QStringLiteral("TX"), rx);
-    }
-    logInfo(QStringLiteral("已发送 %1（%2 帧）")
-        .arg(m_coFuncBox ? m_coFuncBox->currentText() : QString()).arg(frames.size()));
+    // 命令列表为空：下方「发送」不负责单条命令，提示改用上方「单条发送」
+    logWarn(QStringLiteral("命令列表为空，无可发送内容（单条命令请用上方「单条发送」）。"));
 }
 
 void MainWindow::onCoStop()
@@ -3473,13 +3934,16 @@ void MainWindow::coFeedRx(const proto::RxFrame &f)
         m_coRxRowById.insert(f.id, row);
     }
     const int count = m_coRxTable->item(row, RX_COUNT)->text().toInt() + 1;
+    const qint64 oldB = rxRowBytes(m_coRxTable, row);
     m_coRxTable->item(row, RX_ID)->setText(
         QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
     m_coRxTable->item(row, RX_TYPE)->setText(rxTypeText(f));
     m_coRxTable->item(row, RX_LEN)->setText(QString::number(f.data.size()));
     m_coRxTable->item(row, RX_DATA)->setText(QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_coRxTable->item(row, RX_COUNT)->setText(QString::number(count));
+    m_rxBytes[m_coRxTable] += rxRowBytes(m_coRxTable, row) - oldB;
     coAppendScroll(QStringLiteral("RX"), f);
+    capIndexedRows(m_coRxTable, m_coRxRowById);
     applyRxFilter(m_coRxTable);
 }
 
@@ -3503,7 +3967,8 @@ void MainWindow::coAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    enforceScrollCap(m_coScrollTable, row, f.data.size());
+    rxAddRowBytes(m_coScrollTable, row);
+    capScrollRows(m_coScrollTable);
     applyRxFilter(m_coScrollTable);
     if (follow) m_coScrollTable->scrollToBottom();
 }
@@ -3518,8 +3983,22 @@ void MainWindow::coSetRxMode(bool scroll)
     if (m_coModeLbl) m_coModeLbl->setText(scroll ? QStringLiteral("滚动") : QStringLiteral("就地"));
 }
 
-void MainWindow::onAbout()
+// 固件版本比对：从设备上报文本提取 x.y.z，与内置最新固件版本(FW_VERSION)比较
+QString MainWindow::firmwareStatusNote(const QString &devText)
 {
+#ifndef FW_VERSION
+#define FW_VERSION "unknown"
+#endif
+    const QString fwLatest = QStringLiteral(FW_VERSION);
+    if (devText.trimmed().isEmpty()) return QStringLiteral("");
+    static const QRegularExpression re(QStringLiteral("(\\d+\\.\\d+\\.\\d+)"));
+    const QRegularExpressionMatch m = re.match(devText);
+    const QString devNum = m.hasMatch() ? m.captured(1) : devText.trimmed();
+    return (devNum == fwLatest) ? QStringLiteral("（固件最新）")
+                                : QStringLiteral("（固件可更新）");
+}
+
+void MainWindow::onAbout(){
     const bool connected = (m_link && m_link->isOpen());
     if (connected)
         sendCommand(proto::CMD_GET_VERSION, 0, QStringLiteral("查询固件版本"));
@@ -3528,11 +4007,21 @@ void MainWindow::onAbout()
 #ifndef APP_VERSION
 #define APP_VERSION "unknown"
 #endif
-        const QString devFw = m_deviceFwVersion.isEmpty()
-            ? QStringLiteral("未知（未收到版本回包）") : m_deviceFwVersion;
+#ifndef FW_VERSION
+#define FW_VERSION "unknown"
+#endif
+        const QString fwLatest = QStringLiteral(FW_VERSION);   // 上位机内置的固件最新版本
+        QString devFw, note;
+        if (m_deviceFwVersion.isEmpty()) {
+            devFw = QStringLiteral("未知（未收到版本回包）");
+        } else {
+            devFw = m_deviceFwVersion;
+            note = firmwareStatusNote(m_deviceFwVersion);
+        }
         QMessageBox::about(this, QStringLiteral("关于"),
-            QStringLiteral("<b>CyberBeast 协议调试工具</b><br>软件版本：%1<br>设备固件版本：%2")
-                .arg(QStringLiteral(APP_VERSION), devFw));
+            QStringLiteral("<b>CyberBeast 协议调试工具</b><br>软件版本：%1<br>"
+                           "设备固件版本：%2%3<br>内置最新固件：%4")
+                .arg(QStringLiteral(APP_VERSION), devFw, note, fwLatest));
     });
 }
 
@@ -3653,7 +4142,8 @@ void MainWindow::appendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    enforceScrollCap(m_scrollTable, row, f.data.size());
+    rxAddRowBytes(m_scrollTable, row);
+    capScrollRows(m_scrollTable);
     applyRxFilter(m_scrollTable);
     if (follow) m_scrollTable->scrollToBottom();   // 仅当原本在底部时才跟随
 }
@@ -3863,23 +4353,119 @@ void MainWindow::coExSet(int k, double v)
     if (cb) { const int i = cb->findData((int)v); if (i >= 0) cb->setCurrentIndex(i); }
 }
 
-// 滚动接收区上限：累计帧数据超 kScrollMaxBytes(256MB) 时丢弃最旧行，由新数据填充。
-// 每行的帧字节数记录在该行第 0 个单元格的 Qt::UserRole 上，便于精确扣除。
-void MainWindow::enforceScrollCap(QTableWidget *t, int row, int frameBytes)
+// 一行文本占用的近似字节数（UTF-16：2 字节/字符 + 少量开销；空单元格不计）。
+qint64 MainWindow::rxRowBytes(QTableWidget *t, int row) const
 {
-    if (!t) return;
-    if (auto *it = t->item(row, 0)) it->setData(Qt::UserRole, frameBytes);
-    qint64 &acc = m_scrollBytes[t];
-    acc += frameBytes;
-    while (acc > kScrollMaxBytes && t->rowCount() > 1) {
-        qint64 s = 0;
-        if (auto *it0 = t->item(0, 0)) s = it0->data(Qt::UserRole).toLongLong();
-        t->removeRow(0);
-        acc -= s;
-        if (acc < 0) { acc = 0; break; }
+    if (!t || row < 0 || row >= t->rowCount()) return 0;
+    qint64 b = 0;
+    for (int c = 0; c < t->columnCount(); ++c) {
+        auto *it = t->item(row, c);
+        if (it && !it->text().isEmpty()) b += it->text().size() * 2 + 8;
     }
+    return b;
 }
 
+// 记入一行字节（追加新行后调用）。
+void MainWindow::rxAddRowBytes(QTableWidget *t, int row)
+{
+    if (!t) return;
+    m_rxBytes[t] += rxRowBytes(t, row);
+}
+
+// 接收区存储上限：≈10MB（按文本字节数计），超出则丢弃最旧（行 0）。
+// 滚动接收区：按追加顺序，直接丢弃最旧行。
+void MainWindow::capScrollRows(QTableWidget *t)
+{
+    if (!t) return;
+    while (t->rowCount() > 0 &&
+           (m_rxBytes.value(t) > kRxCacheBytes || t->rowCount() > kRxMaxRows)) {
+        m_rxBytes[t] -= rxRowBytes(t, 0);
+        t->removeRow(0);
+    }
+    if (t->rowCount() == 0) m_rxBytes.remove(t);
+}
+
+// 就地接收区（按帧ID汇总）：按字节上限丢弃最旧一条（行 0）并同步 帧ID->行号 映射。
+void MainWindow::capIndexedRows(QTableWidget *t, QHash<quint32, int> &map)
+{
+    if (!t) return;
+    while (t->rowCount() > 0 &&
+           (m_rxBytes.value(t) > kRxCacheBytes || t->rowCount() > kRxMaxRows)) {
+        for (auto it = map.begin(); it != map.end(); ++it)
+            if (it.value() == 0) { map.erase(it); break; }
+        m_rxBytes[t] -= rxRowBytes(t, 0);
+        t->removeRow(0);
+        for (auto it = map.begin(); it != map.end(); ++it)
+            if (it.value() > 0) it.value() -= 1;
+    }
+    if (t->rowCount() == 0) m_rxBytes.remove(t);
+}
+
+// 接收表 → CSV 文本（表头取自表列名）。
+// 接收表 → 记录列表（按列头识别：帧ID/数据/类型；跳过被筛选隐藏的行）。
+QVector<ClipRecord> MainWindow::rxTableRecords(QTableWidget *t) const
+{
+    QVector<ClipRecord> out;
+    if (!t) return out;
+    int cId = -1, cData = -1, cType = -1;
+    for (int c = 0; c < t->columnCount(); ++c) {
+        auto *h = t->horizontalHeaderItem(c);
+        const QString s = h ? h->text() : QString();
+        if (cId < 0 && s.contains(QStringLiteral("帧ID"))) cId = c;
+        else if (cData < 0 && s.contains(QStringLiteral("数据"))) cData = c;
+        else if (cType < 0 && s.contains(QStringLiteral("类型"))) cType = c;
+    }
+    if (cId < 0 || cData < 0) return out;
+    for (int r = 0; r < t->rowCount(); ++r) {
+        if (t->isRowHidden(r)) continue;
+        auto *idIt = t->item(r, cId);
+        if (!idIt) continue;
+        QString idTxt = idIt->text().trimmed();
+        if (idTxt.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) idTxt = idTxt.mid(2);
+        bool ok = false;
+        const quint32 id = idTxt.toUInt(&ok, 16);
+        if (!ok) continue;
+        auto *dataIt = t->item(r, cData);
+        QByteArray data = QByteArray::fromHex(
+            QString(dataIt ? dataIt->text() : QString())
+                .remove(QLatin1Char(' ')).remove(QLatin1Char(':')).toLatin1());
+        ClipRecord rec;
+        rec.id = id;
+        rec.data = data;
+        if (cType >= 0) {
+            const QString ty = t->item(r, cType) ? t->item(r, cType)->text() : QString();
+            rec.extended = ty.contains(QStringLiteral("扩展"));
+            rec.fd  = ty.contains(QStringLiteral("FD"));
+            rec.brs = ty.contains(QStringLiteral("加速"));
+        }
+        out.append(rec);
+    }
+    return out;
+}
+
+// 导出接收区：取当前页面可见的那张接收表 → 勾选式列表窗口（与列表导出统一）。
+void MainWindow::onExportRx()
+{
+    QTableWidget *pick = nullptr;
+    const int mode = m_modeStack ? m_modeStack->currentIndex() : 0;   // 0=CAN 1=RS485 2=EtherCAT
+    if (mode == 2) {                                       // EtherCAT 页无接收表
+        logWarn(QStringLiteral("当前页面没有接收区可导出。"));
+        return;
+    }
+    if (mode == 1) {                                       // RS485 页
+        pick = (m_rs485RxTable && m_rs485RxTable->isVisible()) ? m_rs485RxTable : m_rs485ScrollTable;
+    } else {                                               // CAN 页：按当前协议页
+        const int pi = m_protoStack ? m_protoStack->currentIndex() : 3;
+        if (pi == 0)      pick = (m_cbRxTable && m_cbRxTable->isVisible()) ? m_cbRxTable : m_cbScrollTable;
+        else if (pi == 1) pick = (m_simpleRxTable && m_simpleRxTable->isVisible()) ? m_simpleRxTable : m_simpleScrollTable;
+        else if (pi == 2) pick = (m_coRxTable && m_coRxTable->isVisible()) ? m_coRxTable : m_coScrollTable;
+        else              pick = (m_rxTable && m_rxTable->isVisible()) ? m_rxTable : m_scrollTable;
+    }
+    const QVector<ClipRecord> recs = rxTableRecords(pick);
+    if (recs.isEmpty()) { logWarn(QStringLiteral("接收区没有可导出的数据。")); return; }
+    CommandClipboardDialog dlg(recs, this, QStringLiteral("导出接收数据"));
+    dlg.exec();
+}
 void MainWindow::appendParse(const QString &key, const proto::RxFrame &f)
 {
     QTableWidget *tbl = m_parseAreas.value(key, nullptr);
@@ -3915,7 +4501,6 @@ void MainWindow::clearParseAreas()
     for (auto it = m_parseAreas.begin(); it != m_parseAreas.end(); ++it)
         if (it.value()) it.value()->setRowCount(0);
     m_parseRowById.clear();
-    m_scrollBytes.clear();   // 各滚动区已空，重置字节计数
 }
 
 void MainWindow::onTogglePause()
@@ -4190,13 +4775,16 @@ void MainWindow::cbFeedRx(const proto::RxFrame &f)
         m_cbRxRowById.insert(f.id, row);
     }
     const int count = m_cbRxTable->item(row, RX_COUNT)->text().toInt() + 1;
+    const qint64 oldB = rxRowBytes(m_cbRxTable, row);
     m_cbRxTable->item(row, RX_ID)->setText(
         QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
     m_cbRxTable->item(row, RX_TYPE)->setText(rxTypeText(f));
     m_cbRxTable->item(row, RX_LEN)->setText(QString::number(f.data.size()));
     m_cbRxTable->item(row, RX_DATA)->setText(QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_cbRxTable->item(row, RX_COUNT)->setText(QString::number(count));
+    m_rxBytes[m_cbRxTable] += rxRowBytes(m_cbRxTable, row) - oldB;
     cbAppendScroll(QStringLiteral("RX"), f);
+    capIndexedRows(m_cbRxTable, m_cbRxRowById);
     applyRxFilter(m_cbRxTable);
 }
 
@@ -4220,7 +4808,8 @@ void MainWindow::cbAppendScroll(const QString &dir, const proto::RxFrame &f)
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
-    enforceScrollCap(m_cbScrollTable, row, f.data.size());
+    rxAddRowBytes(m_cbScrollTable, row);
+    capScrollRows(m_cbScrollTable);
     applyRxFilter(m_cbScrollTable);
     if (follow) m_cbScrollTable->scrollToBottom();
 }

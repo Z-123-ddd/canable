@@ -381,9 +381,18 @@ QVector<Wire> buildExampleFrames(const Example &e, const QVector<double> &values
     const quint32 n = (quint32)(node & 0x7F);
     for (int i = 0; i < e.ids.size() && i < payloads.size(); ++i) {
         const quint32 base = e.ids.at(i);
-        // 0x000(NMT)/0x080(SYNC) 与节点无关；其余为「功能基址」，COB-ID = 基址 + 当前节点
-        const quint32 id = (base == 0x000u || base == 0x080u) ? base : (base + n);
-        out.append(Wire{ id, payloads.at(i) });
+        QByteArray pl = payloads.at(i);
+        quint32 id;
+        if (base == 0x000u) {
+            // NMT：ID 恒为 0x000（广播），目标节点在数据第 2 字节 → 跟随 node
+            id = 0x000u;
+            if (pl.size() >= 2) pl[1] = char(n);
+        } else if (base == 0x080u) {
+            id = 0x080u;                       // SYNC：与节点无关
+        } else {
+            id = base + n;                     // 功能帧：COB-ID = 基址 + 当前节点
+        }
+        out.append(Wire{ id, pl });
     }
     return out;
 }
@@ -602,11 +611,18 @@ QVector<OdEntry> objectDictionary()
 
 const OdEntry *findOd(quint16 index, int sub)
 {
+    (void)objectDictionary();          // 确保 g_od 已解析
     const int s = (sub < 0) ? 0 : sub;
-    const QVector<OdEntry> od = objectDictionary();
-    for (const OdEntry &e : od)
-        if (e.index == index && ((e.sub < 0 ? 0 : e.sub) == s)) return &e;
-    return nullptr;
+    // 优先精确匹配子索引；仅在没有子项时才回退到“容器/变量”条目（sub<0）。
+    // 修复：记录型对象的 sub0 之前会被其父容器（sub=-1，无 DataType）抢先命中，
+    //       导致 SDO 写命令首字节按默认 UINT32(0x23) 而非真实类型生成。
+    const OdEntry *exact = nullptr, *container = nullptr;
+    for (const OdEntry &e : g_od) {
+        if (e.index != index) continue;
+        if (e.sub < 0) { if (!container) container = &e; }
+        else if (e.sub == s) { if (!exact) exact = &e; }
+    }
+    return exact ? exact : container;
 }
 
 int sdoTypeFromOd(const QString &dataType)
@@ -749,6 +765,12 @@ bool selfTest(QString *report)
         for (const OdEntry &e : od) if (e.index == 0x607A) pos = &e;
         if (pos) check(encodeOdValue(*pos, 1) == QByteArray::fromHex("01000000"),
                        QStringLiteral("encodeOdValue(607Ah,1) -> 01 00 00 00 (INT32 LE)"));
+        // findOd 优先返回精确子索引：记录型 sub0 不应被父容器（无类型）抢先
+        const OdEntry *sf0 = findOd(0x608F, 0);
+        check(sf0 && sf0->dataType == QLatin1String("UINT8"),
+              QStringLiteral("findOd(608Fh:00) -> UINT8（非父容器）"));
+        check(sdoTypeFromOd(sf0 ? sf0->dataType : QString()) == SDO_UINT8,
+              QStringLiteral("608Fh:00 类型 -> 1 字节 SDO 写（首字节 0x2F）"));
     }
 
     // 单位换算（输出轴 → 电机 counts，转换因子 16384）
@@ -786,11 +808,14 @@ bool selfTest(QString *report)
                 e.ids.size() == 7 && e.ids.last() == 0x300) pos = &e;
         }
         check(vel != nullptr && pos != nullptr, QStringLiteral("速度/位置示例已挂输入槽"));
-        // 帧 ID 按节点重算：示例按 node=1 存储，node=5 时整体 +4（NMT 不变）
+        // 帧 ID 按节点重算：示例按 node=1 存储，node=5 时整体 +4（NMT ID 恒 0x000）
         if (vel) {
             const QVector<Wire> wn = buildExampleFrames(*vel, {0.125}, {0}, 1.0, 5);
             check(!wn.isEmpty() && wn.first().id == 0x000 && wn.last().id == 0x405,
                   QStringLiteral("速度示例 node=5 -> SDO 0x601→0x605, RPDO 0x401→0x405"));
+            // NMT 帧数据第 2 字节 = 目标节点，跟随 node（bug 修复）
+            check(wn.first().data == QByteArray::fromHex("0105"),
+                  QStringLiteral("速度示例 node=5 -> NMT 数据 01 05（节点跟随 id）"));
         }
         if (vel) {
             const QVector<Wire> w = buildExampleFrames(*vel, {0.125}, {0}, 1.0);

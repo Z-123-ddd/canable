@@ -3,7 +3,7 @@
 //    控件约定：
 //      · 波特率选择     -> 下拉框
 //      · 循环发送       -> 复选框（决定 TX_START 触发 value）
-//      · 列表/单帧模式  -> 由列表勾选数量决定（≥2 列表 / 1 单帧 / 0 用编辑区）
+//      · 列表/单帧模式  -> 两个显式按钮：「单条发送」取单帧编辑区 /「列表发送」取勾选行
 //      · 布局：左=发送（编辑/列表/操作/日志），右=接收（按帧 id 就地更新）
 // ============================================================================
 #ifndef MAINWINDOW_H
@@ -12,10 +12,15 @@
 #include <QMainWindow>
 #include <QVector>
 #include <QHash>
+#include <QThread>
+#include <functional>
 #include "Protocol.h"
+#include "EsiXml.h"
+#include "CommandClipboardDialog.h"
 
 class SerialLink;
 class EtherCatLink;
+class JointController;
 class UsbLink;
 class Link;
 class QComboBox;
@@ -68,10 +73,29 @@ struct CoListEntry {
 };
 
 // CANopen PDO 一行：EDS 对象（索引/子索引）+ 用户数值
-struct CoPdoRow {
-    int     index = 0x6071;   // 对象索引
+struct CoPdoRow {    int     index = 0x6071;   // 对象索引
     int     sub   = 0;        // 子索引
     QString value = QStringLiteral("0");
+};
+
+// 在独立线程执行一次阻塞的 EtherCAT 操作（状态切换 / 伺服使能准备），
+// 避免 SOEM 的同步调用阻塞 GUI 线程导致界面卡死。结果经 jobDone 信号回主线程。
+class EcJob : public QThread
+{
+    Q_OBJECT
+public:
+    explicit EcJob(QObject *parent = nullptr) : QThread(parent) {}
+    void runJob(std::function<QPair<bool, QString>()> fn) { m_fn = std::move(fn); start(); }
+signals:
+    void jobDone(bool ok, const QString &msg);
+protected:
+    void run() override {
+        bool ok = false; QString msg;
+        if (m_fn) { const QPair<bool, QString> r = m_fn(); ok = r.first; msg = r.second; }
+        emit jobDone(ok, msg);
+    }
+private:
+    std::function<QPair<bool, QString>()> m_fn;
 };
 
 class MainWindow : public QMainWindow
@@ -81,8 +105,10 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
-    // 组合并按规则发送（不含串口检查），返回本次动作摘要；供 UI 与无头自测复用
-    QString doSend();
+    // 单条发送（取单帧编辑区）；返回本次动作摘要；供 UI 与无头自测复用
+    QString doSendSingle();
+    // 列表发送（取发送列表中勾选的行）；返回本次动作摘要；供 UI 与无头自测复用
+    QString doSendList();
     // 当前日志文本（供无头自测读取）
     QString logText() const;
     // 串口写入次数 / 最近一次写入的字节（供无头自测校验“打包一次发送”）
@@ -104,6 +130,11 @@ public:
 
     // 导出已勾选记录为 CSV 文本（不含写文件）；供 UI 与无头自测校验
     QString buildExportCsv() const;
+    QVector<ClipRecord> rxTableRecords(QTableWidget *t) const;   // 接收表 → 记录（供导出/自测）
+    // 固件版本比对：设备上报文本 vs 内置最新固件版本(APP 内置 FW_VERSION)，返回状态描述
+    static QString firmwareStatusNote(const QString &devText);
+    // 单条发送（CANopen）取用的帧：始终取参数框中当前配置的命令，与命令列表无关
+    QVector<QByteArray> coSingleCommandFrames(QString *what = nullptr) const;
     // 统一的发送缓存（模式未变不发 SET_MODE，数据未变不发数据帧，总是发 TX_START）；
     // 供各页面与自测调用。
     void sendCachedFrames(bool listMode, const QVector<QByteArray> &frames,
@@ -128,14 +159,18 @@ private slots:
 
     void onResetList();     // 重置为 20 行空表格（默认值）
     void onExportCsv();     // 导出已勾选记录为 CSV
+    void onExportListRecords();   // 通用发送列表 → 弹出剪切栏窗口（复制/导出）
+    void coExportListRecords();   // CANopen 命令列表 → 弹出剪切栏窗口（复制/导出）
     void onImportCsv();     // 导入其他 CAN 工具的记录文件到发送列表
     void onUpdateFirmware();// 进入 DFU 并打开固件更新对话框
     void onClearRx();       // 清空接收区
     void onClearLog();      // 清空日志
-    void onSend();
+    void onSendSingle();    // 单条发送（取单帧编辑区）
+    void onSendList();      // 列表发送（取勾选行）
     void onStop();
     void onQueryStatus();
-    void onAbout();                 // 帮助：关于（显示软件/固件版本，点击时自动查询命令 10）
+    // 帮助：关于（软件版本 + 设备固件版本）
+    void onAbout();
 
     // ---- 接收暂停（冻结接收 + 清未完成帧）----
     void onTogglePause();               // 暂停/恢复接收（下发命令 11 + 冻结本机接收）
@@ -151,7 +186,8 @@ private slots:
     void onSimpleStop();                // 停止发送
 
     // Open（CANopen）协议页
-    void onCoSend();                    // 发送（普通帧单发；实战示例=序列）
+    void onCoSend();                    // 下方「发送」：只发送命令列表（全部）；实战示例=序列
+    void onCoSendSingle();              // 上方「单条发送」：只发参数框中当前配置的单条命令（与列表无关）
     void onCoStop();                    // 停止发送
     void onOpenObjectDictionary();      // 打开对象字典浏览器（EDS）
     // Open 页命令列表（可追加、按顺序发送、调换顺序）
@@ -161,6 +197,7 @@ private slots:
     void coRemoveListRow(int row);
     void coSnapshotCoList();            // 从控件同步模型（拖动后）
     void coRestoreFromEntry(int row);   // 点击列表项：回填编辑器（供再次修改）
+    void coEditEntryBytes(int row);     // 双击列表项：手动编辑该命令的字节内容
     void coMapAddRow();                 // PDO 映射修改：追加一个目标对象
     void coMapRemoveRow(int i);         // PDO 映射修改：删除一个目标对象
     // 接收区筛选（各页接收区表头上方，每列一个输入框；随当前可见表切换）
@@ -192,13 +229,17 @@ private:
     // 把一行表格内容构建成一帧；返回空表示该行无效
     QByteArray buildRowFrame(int row, QString *err = nullptr) const;
 
-    // 收集当前"有效载荷"：勾选>1 用勾选行(列表)，=1 用该行(单帧)，0 用编辑区(单帧)
+    // 收集"单条发送"有效载荷：仅取单帧编辑区
     struct Payload {
         bool isList = false;          // true: 列表发送; false: 单帧
         QVector<QByteArray> frames;   // 要下发的数据帧（列表时为勾选行）
         bool empty() const { return frames.isEmpty(); }
     };
-    Payload collectPayload(QString *info = nullptr) const;
+    Payload buildPayloadSingle(QString *info = nullptr) const;
+    // 收集"列表发送"有效载荷：仅取发送列表中勾选的行（不勾选则空）
+    Payload buildPayloadList(QString *info = nullptr) const;
+    // 下发一份有效载荷（滚动区回显 + 缓存发送 + flush），返回动作摘要
+    QString sendPayload(const Payload &p, const QString &info);
 
     // 仅发送表格第 row 行（单帧，忽略勾选）；供空格键使用
     void sendRowFrame(int row);
@@ -223,14 +264,28 @@ private:
     void         onTransportChanged(int panelIdx);
     void         onPortChanged(int panelIdx);
     void setWorkMode(int mode);     // 模式菜单：切页面（CAN=0/RS485=1/EtherCAT=2）
-    // ---- EtherCAT（主站，SOEM）----
+    // ---- EtherCAT（统一走厂商 joint-sdk；仅网卡枚举用 SOEM 静态接口）----
     void onEcRefreshAdapters();     // 扫描主机网卡
-    void onEcOpenToggle();          // 打开/关闭所选网卡
-    void onEcScanSlaves();          // 扫描从站（ecx_config_init）
-    void onEcMap();                 // 映射过程数据（ecx_config_map_group）
-    void onEcRunToggle();           // 启动/停止周期过程数据（定时器）
-    void onEcSdoRead();             // CoE SDO 读
-    void onEcSdoWrite();            // CoE SDO 写
+    void onEcSdoRead();             // 经 joint-sdk 的 SDO 读
+    void onEcSdoWrite();            // 经 joint-sdk 的 SDO 写
+    // ---- EtherCAT 后台任务（阻塞操作放工作线程，避免卡死）----
+    void startEcJob(std::function<QPair<bool, QString>()> fn, const QString &busyLog);
+    void onEcJobDone(bool ok, const QString &msg);
+    void setEcBusy(bool busy);
+    // ---- EtherCAT 对象字典（ESI XML）----
+    void onEcImportXml();
+    void onEcObjSelected(int idx);
+    // ---- EtherCAT 关节（joint-sdk）----
+    void onJointOpenConfig();     // 打开网卡 + 配置(SAFE_OP)
+    void onJointActivate();       // 激活(OP)
+    void onJointEnable();
+    void onJointDisable();
+    void onJointFaultReset();
+    void onJointRunToggle();      // 启动/停止周期
+    void jointCycle();
+    // 从站 PDO 分配为空时，按已导入 ESI 写入 0x1C12/0x1C13（含映射项，除非 Fixed）；
+    // 返回是否发生了写入。仅在工作线程调用（内部为阻塞 SDO）。
+    bool ecConfigurePdoFromEsi(int slave, QString *log);
     // ---- Simple 协议页 ----
     void rebuildSimpleParams();                        // 按当前命令重建参数输入框
     void updateSimplePreview();                        // 刷新预览（CAN ID / 数据 hex）
@@ -240,6 +295,7 @@ private:
     // ---- Open（CANopen）协议页 ----
     void rebuildCoParams();                             // 按当前功能重建参数输入
     void updateCoPreview();                             // 刷新预览（COB-ID / DATA / 序列）
+    void coUpdateSdoOpAvail();                          // 按 EDS 访问类型(ro/rw/wo)启用/禁用 读/写 选项
     int  curCoExample() const;                          // 当前选中示例索引（-1=普通功能）
     QVector<QByteArray> buildCoFrames(QString *err) const; // 普通功能=1 帧；示例=固定序列
     void coFeedRx(const proto::RxFrame &f);             // 接收：就地汇总 + 滚动
@@ -258,7 +314,12 @@ private:
     int    coExUnit(int k) const;
     void   coExSet(int k, double v);
     void clearParseAreas();                                          // 清空全部解析区（所有协议页）
-    void enforceScrollCap(QTableWidget *t, int row, int frameBytes);  // 滚动区 256MB 上限
+    void capScrollRows(QTableWidget *t);                             // 滚动接收区：超出 kRxCacheBytes(≈10MB) 丢弃最旧
+    void capIndexedRows(QTableWidget *t, QHash<quint32,int> &map);   // 就地接收区：超出 kRxCacheBytes(≈10MB) 丢弃最旧
+    qint64 rxRowBytes(QTableWidget *t, int row) const;               // 一行占用的近似字节数
+    void   rxAddRowBytes(QTableWidget *t, int row);                  // 记入一行字节（新增行）
+    QHash<QTableWidget*, qint64> m_rxBytes;                          // 各接收表已缓存字节数（用于 ≈10MB 上限）
+    void onExportRx();                                               // 导出接收区（当前显示）数据
     QPushButton *makePauseButton();          // 生成接收区“暂停/恢复”按钮并登记
     void applyPauseUi();                     // 按 m_rxPaused 刷新所有暂停按钮文本/接收状态
     // ---- CyberBeast 协议页 ----
@@ -274,25 +335,38 @@ private:
     SerialLink *m_serial = nullptr;
     UsbLink    *m_usb = nullptr;
     Link       *m_link = nullptr;    // 当前活动传输（串口或 USB）
-    EtherCatLink *m_ethercat = nullptr;  // EtherCAT 主站（SOEM，独立于 AA AA 协议）
-    // ---- EtherCAT 页控件 ----
+    // ---- EtherCAT 页控件（统一走厂商 joint-sdk；网卡枚举用 SOEM 静态接口）----
     QComboBox   *m_ecAdapterBox = nullptr;   // 网卡(适配器)下拉
     QPushButton *m_ecRefreshBtn = nullptr;
-    QPushButton *m_ecOpenBtn = nullptr;
     QLabel      *m_ecStatusLbl = nullptr;
-    QPushButton *m_ecScanBtn = nullptr;
-    QTableWidget *m_ecSlaveTable = nullptr;
-    QPushButton *m_ecMapBtn = nullptr;
-    QPushButton *m_ecRunBtn = nullptr;
-    QLabel      *m_ecWkcLbl = nullptr;
-    QSpinBox    *m_ecSlaveSpin = nullptr;     // CoE：从站号
-    QLineEdit   *m_ecIndexEdit = nullptr;     // CoE：索引(hex)
-    QLineEdit   *m_ecSubEdit = nullptr;       // CoE：子索引
-    QLineEdit   *m_ecValEdit = nullptr;       // CoE：值(hex)
+    QLineEdit   *m_ecIndexEdit = nullptr;     // 对象字典：索引(hex)
+    QLineEdit   *m_ecSubEdit = nullptr;       // 对象字典：子索引
+    QLineEdit   *m_ecValEdit = nullptr;       // 对象字典：值(hex)
     QPushButton *m_ecSdoReadBtn = nullptr;
     QPushButton *m_ecSdoWriteBtn = nullptr;
     QLabel      *m_ecSdoResultLbl = nullptr;
-    QTimer      *m_ecTimer = nullptr;         // 周期过程数据
+    // ---- EtherCAT ESI XML 对象字典 ----
+    QPushButton *m_ecImportXmlBtn = nullptr;      // 导入 XML(ESI)
+    QLabel      *m_ecXmlLabel = nullptr;          // 已导入文件名 / 统计
+    QComboBox   *m_ecObjBox = nullptr;            // 对象下拉（来自 XML）
+    EsiXmlData   m_esi;                           // 已解析的 ESI 数据
+    QString      m_esiPath;                       // 已导入 XML 路径
+    // ---- EtherCAT 关节（joint-sdk）----
+    JointController *m_joint = nullptr;           // 关节控制器（jsdk）
+    QSpinBox    *m_jointPosSpin = nullptr;        // 从站拓扑序号
+    QComboBox   *m_jointModeBox = nullptr;        // 使能模式
+    QPushButton *m_jointOpenBtn = nullptr;
+    QPushButton *m_jointActivateBtn = nullptr;
+    QPushButton *m_jointEnableBtn = nullptr;
+    QPushButton *m_jointDisableBtn = nullptr;
+    QPushButton *m_jointFaultBtn = nullptr;
+    QPushButton *m_jointRunBtn = nullptr;
+    QLineEdit   *m_jointTargetEdit = nullptr;
+    QLabel      *m_jointStatusLbl = nullptr;
+    QTimer      *m_jointTimer = nullptr;
+    bool         m_jointStartAfterJob = false;    // 后台激活成功后自动启动周期
+    EcJob       *m_ecJob = nullptr;               // EtherCAT 阻塞操作的工作线程
+    bool         m_ecBusy = false;                // 是否有 EtherCAT 后台任务在跑
 
     // 串口/USB 传输选择
     QComboBox *m_transportBox = nullptr;
@@ -318,6 +392,7 @@ private:
     QTableWidget *m_table = nullptr;
     QPushButton *m_resetBtn = nullptr;
     QPushButton *m_exportBtn = nullptr;
+    QPushButton *m_exportClipBtn = nullptr;   // 导出列表记录（弹出剪切栏窗口）
     QPushButton *m_importBtn = nullptr;
 
     // 接收区（接收表格）
@@ -332,12 +407,13 @@ private:
     bool m_scrollMode = false;           // false=就地更新, true=滚动显示
 
     // 操作
-    QPushButton *m_sendBtn = nullptr;
+    QPushButton *m_sendSingleBtn = nullptr;   // 单条发送（单帧编辑区下方）
+    QPushButton *m_sendListBtn = nullptr;     // 列表发送（发送列表下方）
     QPushButton *m_stopBtn = nullptr;
     QPushButton *m_statusBtn = nullptr;
     QPushButton *m_clearLogBtn = nullptr;
 
-    // 发送打包缓冲：一次 doSend/连接 的全部指令拼成一条消息写出
+    // 发送打包缓冲：一次发送/连接 的全部指令拼成一条消息写出
     QByteArray m_txBuf;
     int m_txFlushCount = 0;
     QByteArray m_lastFlush;
@@ -442,6 +518,7 @@ private:
     QListWidget *m_coList = nullptr;              // 待发送命令列表
     QPushButton *m_coAddBtn = nullptr;            // 追加到列表
     QPushButton *m_coListClearBtn = nullptr;      // 清空列表
+    QPushButton *m_coExportBtn = nullptr;         // 导出列表记录（弹出剪切栏窗口）
     QVector<CoListEntry> m_coListModel;           // 命令列表模型
     int          m_coEditRow = -1;                // 当前正在编辑的列表行（-1=追加模式）
     // 实战示例的用户输入（位置/速度/力矩），与 examples()[ex].inputs 平行
@@ -452,6 +529,8 @@ private:
     QComboBox   *m_coHbStateBox = nullptr;      // 心跳状态字节
     QLineEdit   *m_coPreview = nullptr;         // 预览
     QPushButton *m_coSendBtn = nullptr;
+    QPushButton *m_coSendSingleBtn = nullptr;   // 单条发送（参数框中当前配置的单条命令，与列表无关）
+    QWidget     *m_coSingleRow = nullptr;       // 单条发送按钮所在的独立行（实战示例时隐藏）
     QPushButton *m_coStopBtn = nullptr;
     QPushButton *m_coOdBrowserBtn = nullptr;    // 对象字典按钮
     QTableWidget *m_coRxTable = nullptr;        // 接收：就地汇总
@@ -471,8 +550,9 @@ private:
     QVector<QPushButton *> m_pauseBtns;      // 各接收区的暂停按钮（文本随状态刷新）
     QHash<QString, QTableWidget *> m_parseAreas;             // 协议 key -> 解析区表格
     QHash<QString, QHash<quint32, int>> m_parseRowById;      // 协议 key -> (帧ID -> 行号)，就地更新
-    QHash<QTableWidget *, qint64> m_scrollBytes;            // 各滚动区累计帧数据字节数
-    static constexpr qint64 kScrollMaxBytes = 256LL * 1024 * 1024;   // 滚动区上限 256MB
+    // 接收区缓存上限：≈10MB（按文本字节数计），超出丢弃最旧
+    static constexpr qint64 kRxCacheBytes = 10LL * 1024 * 1024;
+    static constexpr int    kRxMaxRows    = 1000000;   // 兜底行数上限（防极端情况下无限增长）
     QLineEdit *m_rxPartialEdit = nullptr;    // (预留)
     // ---- CyberBeast 协议页控件 ----
     QLineEdit   *m_cbMasterEdit = nullptr;   // 主站(源)地址

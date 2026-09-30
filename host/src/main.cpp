@@ -1,5 +1,8 @@
 // CANable2-N32 上位机 — 程序入口
 #include <QApplication>
+#include <QClipboard>
+#include <QItemSelection>
+#include <QStandardItemModel>
 #include <QFont>
 #include <QString>
 #include <QStringList>
@@ -20,6 +23,7 @@
 #include <QScreen>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QSplitter>
 #include <QGroupBox>
 #include <QAction>
 #include <QMenuBar>
@@ -36,13 +40,18 @@
 #include <QDir>
 #include <QFile>
 #include "TraceImporter.h"
+#include "CommandClipboardDialog.h"
+#include "ServoDs402.h"
+#include "EsiXml.h"
+#include "EtherCatLink.h"
+#include <joint_sdk/joint_sdk.h>
 #include "dfu_device.h"
 #include "VendorDfuFlasher.h"
 #include "UsbLink.h"
 
 // 无头 UI 逻辑自测：
 //  - 排版：发送表默认 20 行、行号列、选择列无表头、默认未勾选
-//  - 发送：勾选数决定模式、仅数据变化才打包、一次 doSend 只写一次
+//  - 发送：单条发送(编辑区)/列表发送(勾选行)两个按钮、仅数据变化才打包、一次发送只写一次
 //  - 接收：相同帧 id 就地更新（行数不变），不同 id 多行
 static int runUiTest()
 {
@@ -95,21 +104,23 @@ static int runUiTest()
 
     table->item(0, C_CHK)->setCheckState(Qt::Checked);
     table->item(1, C_CHK)->setCheckState(Qt::Checked);
-    const QString first  = w.doSend();
-    const QByteArray firstFlush = w.lastTxFlush();
+    const QString list1  = w.doSendList();                     // 列表发送（勾选 2 行）
+    const QByteArray listFlush = w.lastTxFlush();
     const int scrollBefore2 = scroll ? scroll->rowCount() : 0;
-    const QString second = w.doSend();
-    const QByteArray secondFlush = w.lastTxFlush();
+    const QString list2  = w.doSendList();                     // 数据未变化 → 只发 TX_START
+    const QByteArray listFlush2 = w.lastTxFlush();
     const int scrollAfter2 = scroll ? scroll->rowCount() : 0;
     // 数据未变化：滚动区仍打印要发送的帧，但实际只下发 TX_START 命令（未打包数据帧）
     const bool echoUnchangedOk =
         (scrollAfter2 - scrollBefore2) == 2 &&
-        (secondFlush == QByteArray::fromHex("AAAA0200000000"));
+        (listFlush2 == QByteArray::fromHex("AAAA0200000000"));
 
-    table->item(1, C_CHK)->setCheckState(Qt::Unchecked);
-    const QString single1 = w.doSend();
+    // 单条发送：取单帧编辑区（id=300, data=01 02）
+    const QString single1 = w.doSendSingle();
+    // 清空勾选后"列表发送" → 无可发送数据（不写串口）
     table->item(0, C_CHK)->setCheckState(Qt::Unchecked);
-    const QString single2 = w.doSend();
+    table->item(1, C_CHK)->setCheckState(Qt::Unchecked);
+    const QString listEmpty = w.doSendList();
 
     // 日志区不再出现 TX 数据/命令 hex（仅告警/报错）
     const QString log = w.logText();
@@ -117,12 +128,12 @@ static int runUiTest()
                           !log.contains(QStringLiteral("AA AB")) &&
                           !log.contains(QStringLiteral("AA AA"));
 
-    const int flushTotal = w.txFlushCount() - flush0;   // 期望 4
-    bool bundle1 = firstFlush.startsWith(QByteArray::fromHex("AAAA07"))
-                   && firstFlush.endsWith(QByteArray::fromHex("AAAA0200000000"))
-                   && firstFlush.contains(QByteArray::fromHex("AAAA06"))
-                   && firstFlush.size() == 51;
-    bool bundle2 = (secondFlush == QByteArray::fromHex("AAAA0200000000"));
+    const int flushTotal = w.txFlushCount() - flush0;   // 期望 3（两次列表 + 一次单条）
+    bool bundle1 = listFlush.startsWith(QByteArray::fromHex("AAAA07"))
+                   && listFlush.endsWith(QByteArray::fromHex("AAAA0200000000"))
+                   && listFlush.contains(QByteArray::fromHex("AAAA06"))
+                   && listFlush.size() == 51;
+    bool bundle2 = (listFlush2 == QByteArray::fromHex("AAAA0200000000"));
 
     // ---- 接收区就地更新 ----
     proto::RxFrame f1; f1.id = 0x1; f1.data = QByteArray::fromHex("0102");
@@ -137,6 +148,38 @@ static int runUiTest()
                 && w.rxCellText(0, 4) == QStringLiteral("2");        // 次数=2
     // 无边线
     bool noGrid = !rxTable->showGrid();
+
+    // ---- 接收区数据导出：buildRxCsv 产出表头 + 行 ----
+    bool rxExportOk = false;
+    {
+        const QVector<ClipRecord> recs = w.rxTableRecords(rxTable);
+        bool found1 = false, found2 = false;
+        for (const ClipRecord &r : recs) {
+            if (r.id == 0x1u && r.data == QByteArray::fromHex("030405")) found1 = true;
+            if (r.id == 0x2u && r.data == QByteArray::fromHex("AABB"))  found2 = true;
+        }
+        rxExportOk = (recs.size() == 2) && found1 && found2;
+        std::fputs(QStringLiteral("UITEST rxExport ok=%1 n=%2\n")
+                       .arg(rxExportOk ? 1 : 0).arg(recs.size())
+                       .toLocal8Bit().constData(), stdout);
+    }
+
+
+    // ---- 接收区存储上限：已提升到 ≈10MB（150 条远未达上限，应全部保留）----
+    bool rxCapOk = false;
+    {
+        MainWindow wCap;
+        for (int i = 0; i < 150; ++i) {          // 喂 150 个不同帧ID
+            proto::RxFrame f;
+            f.id = (quint32)(0x100 + i);
+            f.data = QByteArray::fromHex("01");
+            wCap.simulateRx(f);
+        }
+        // 接收缓存上限已提升到 ≈10MB：150 条远未达上限，应全部保留
+        rxCapOk = (wCap.rxRowCount() == 150) &&
+                  wCap.rxCellText(0, 0) == QStringLiteral("0X100") &&
+                  wCap.rxCellText(149, 0) == QStringLiteral("0X195");
+    }
 
     // ---- 导出 CSV：仅勾选行 ----
     // 此时勾选状态：行1 已在前面被取消，行0 也被取消 -> 重新勾选行0、行1
@@ -156,13 +199,87 @@ static int runUiTest()
                    .arg(rowsCsv.size()).arg(csvOk ? 1 : 0)
                    .toLocal8Bit().constData(), stdout);
 
-    bool ok = first.contains(QStringLiteral("changed=1")) && first.contains(QStringLiteral("列表"))
-              && second.contains(QStringLiteral("changed=0"))
-              && single1.contains(QStringLiteral("changed=1"))
-              && single2.contains(QStringLiteral("changed=1"))
+    // ---- 命令剪切栏：文本格式 + CSV/ASC/candump/TRC 导出（并回读校验）----
+    bool clipOk = false;
+    {
+        QVector<ClipRecord> recs;
+        ClipRecord r1; r1.id = 0x100; r1.extended = false; r1.data = QByteArray::fromHex("11223344");
+        ClipRecord r2; r2.id = 0x18FF50E5; r2.extended = true; r2.data = QByteArray::fromHex("AABBCCDD");
+        recs << r1 << r2;
+
+        const QString pipe = CommandClipboardDialog::pipeText(recs);
+        const QStringList pl = pipe.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        const QString clipCsv = CommandClipboardDialog::exportText(recs, CommandClipboardDialog::Csv);
+        clipOk = pl.size() == 2
+                 && pl[0] == QStringLiteral("0x100|11 22 33 44|标准")
+                 && pl[1] == QStringLiteral("0x18FF50E5|AA BB CC DD|扩展")
+                 && clipCsv.contains(QStringLiteral("序号,帧ID,帧格式,帧类型,数据长度,数据"))
+                 && clipCsv.contains(QStringLiteral("0x100,标准帧,CAN,4,11 22 33 44"))
+                 && clipCsv.contains(QStringLiteral("0x18FF50E5,扩展帧,CAN,4,AA BB CC DD"));
+
+        // 回读校验：CSV / ASC / candump / TRC 均可被 TraceImporter 解析回同样的帧
+        const QString dir = QDir::tempPath();
+        auto roundTrip = [&](CommandClipboardDialog::Format fmt) -> bool {
+            const QString path = dir + QStringLiteral("/clip_rt.") +
+                                 CommandClipboardDialog::defaultExt(fmt);
+            QFile f(path);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+            f.write(CommandClipboardDialog::exportText(recs, fmt).toUtf8());
+            f.close();
+            const trace::Result res = trace::load(path);
+            if (!res.ok || res.frames.size() != 2) return false;
+            bool okk = true;
+            for (int i = 0; i < 2; ++i) {
+                const ClipRecord &a = recs[i];
+                const trace::Frame &b = res.frames[i];
+                if (a.id != b.id || a.extended != b.extended || a.data != b.data)
+                    okk = false;
+            }
+            return okk;
+        };
+        const bool rtCsv  = roundTrip(CommandClipboardDialog::Csv);
+        const bool rtAsc  = roundTrip(CommandClipboardDialog::Asc);
+        const bool rtTrc  = roundTrip(CommandClipboardDialog::Trc);
+        const bool rtCand = roundTrip(CommandClipboardDialog::Candump);
+        clipOk = clipOk && rtCsv && rtAsc && rtTrc && rtCand;
+
+        // 选择式列表窗口：默认全选；清空后 selectedRecords 为空；可单选/范围选择
+        {
+            CommandClipboardDialog dlg(recs);
+            auto *tb = dlg.findChild<QTableWidget *>("clipTable");
+            const bool defAll = tb && dlg.selectedRecords().size() == 2;
+            QMetaObject::invokeMethod(&dlg, "selectNone", Qt::DirectConnection);
+            const bool none = dlg.selectedRecords().isEmpty();
+            bool one = false, range = false;
+            if (tb) {
+                tb->selectRow(0);                          // 单击选中一行
+                one = dlg.selectedRecords().size() == 1;
+                // 模拟 Shift+点击范围：选中 0..1
+                if (tb->selectionModel())
+                    tb->selectionModel()->select(
+                        QItemSelection(tb->model()->index(0, 0), tb->model()->index(1, 0)),
+                        QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                range = dlg.selectedRecords().size() == 2;
+            }
+            qApp->clipboard()->clear();
+            QMetaObject::invokeMethod(&dlg, "copyToClipboard", Qt::DirectConnection);
+            const bool copiedSel = qApp->clipboard()->text().contains(QStringLiteral("0x100|11 22 33 44|标准"));
+            clipOk = clipOk && defAll && none && one && range && copiedSel;
+        }
+
+        std::fputs(QStringLiteral("UITEST clip ok=%1 csv=%2 asc=%3 trc=%4 candump=%5\n")
+                       .arg(clipOk ? 1 : 0).arg(rtCsv ? 1 : 0).arg(rtAsc ? 1 : 0)
+                       .arg(rtTrc ? 1 : 0).arg(rtCand ? 1 : 0)
+                       .toLocal8Bit().constData(), stdout);
+    }
+
+    bool ok = list1.contains(QStringLiteral("changed=1")) && list1.contains(QStringLiteral("列表发送"))
+              && list2.contains(QStringLiteral("changed=0")) && echoUnchangedOk
+              && single1.contains(QStringLiteral("changed=1")) && single1.contains(QStringLiteral("单条发送"))
+              && listEmpty.contains(QStringLiteral("empty"))
               && logClean
-              && flushTotal == 4 && bundle1 && bundle2
-              && rxRows == 2 && rxOk && noGrid && csvOk;
+              && flushTotal == 3 && bundle1 && bundle2
+              && rxRows == 2 && rxOk && noGrid && csvOk && rxCapOk && clipOk && rxExportOk;
 
     // ---- 接收区按字段筛选（跟随当前可见表）----
     bool rxFilterOk = false;
@@ -255,10 +372,10 @@ static int runUiTest()
             actCan->trigger();                       // 切回 CAN
             const bool toCan = (stack->currentWidget() == pageCan);
             modeSwitchOk = toRs485 && toEc && toCan;
-            // EtherCAT 页关键控件存在 + 适配器扫描不崩溃
+            // EtherCAT 页关键控件存在（统一走 joint-sdk）+ 适配器扫描不崩溃
             auto *ecAd = w.findChild<QComboBox *>("ecAdapterBox");
-            auto *ecScan = w.findChild<QPushButton *>("ecScanBtn");
-            if (!(ecAd && ecScan)) modeSwitchOk = false;
+            auto *ecJOpen = w.findChild<QPushButton *>("jointOpenBtn");
+            if (!(ecAd && ecJOpen)) modeSwitchOk = false;
         }
         QString line = QStringLiteral("UITEST menu ok=%1 modeSwitch=%2")
                            .arg(menuOk ? 1 : 0).arg(modeSwitchOk ? 1 : 0);
@@ -266,6 +383,133 @@ static int runUiTest()
         std::fputs(line.toLocal8Bit().constData(), stdout);
     }
     ok = ok && menuOk && modeSwitchOk;
+
+    // ---- EtherCAT：统一走厂商 joint-sdk（无裸 SOEM 控件）+ DS402 状态机 ----
+    bool ecServoOk = false;
+    {
+        auto *pageEc   = w.findChild<QWidget *>("pageEtherCat");
+        auto *xmlBtn   = w.findChild<QPushButton *>("ecImportXmlBtn");
+        auto *objBox   = w.findChild<QComboBox *>("ecObjBox");
+        auto *sdoR     = w.findChild<QPushButton *>("ecSdoReadBtn");
+        auto *sdoW     = w.findChild<QPushButton *>("ecSdoWriteBtn");
+        auto *jOpen    = w.findChild<QPushButton *>("jointOpenBtn");
+        auto *jAct     = w.findChild<QPushButton *>("jointActivateBtn");
+        auto *jEn      = w.findChild<QPushButton *>("jointEnableBtn");
+        auto *jCmd     = w.findChild<QComboBox *>("jointModeBox");
+        auto *jStat    = w.findChild<QLabel *>("jointStatusLbl");
+        // 裸 SOEM 控件应已移除
+        const bool rawGone = !w.findChild<QPushButton *>("ecScanBtn")
+                          && !w.findChild<QPushButton *>("ecOpBtn")
+                          && !w.findChild<QPushButton *>("ecServoEnableBtn");
+        ecServoOk = pageEc && xmlBtn && objBox && sdoR && sdoW &&
+                    jOpen && jAct && jEn && jCmd && jStat && rawGone &&
+                    jCmd->currentData().toInt() == 8;          // 关节默认 CSP=8
+
+        // DS402 状态机（纯逻辑）
+        using ds402::State;
+        ecServoOk = ecServoOk &&
+            ds402::decode(0x0040) == State::SwitchOnDisabled &&   // 0x0040
+            ds402::decode(0x0021) == State::ReadyToSwitchOn &&    // 0x0021
+            ds402::decode(0x0023) == State::SwitchedOn &&         // 0x0023
+            ds402::decode(0x0027) == State::OperationEnabled &&   // 0x0027
+            ds402::decode(0x0008) == State::Fault &&              // 故障
+            ds402::nextEnableControlword(0x0040) == 0x0006 &&     // Shutdown
+            ds402::nextEnableControlword(0x0021) == 0x0007 &&     // Switch on
+            ds402::nextEnableControlword(0x0023) == 0x000F &&     // Enable operation
+            ds402::nextEnableControlword(0x0027) == 0x000F &&     // 保持
+            ds402::nextEnableControlword(0x0008) == 0x0080 &&     // Fault reset
+            ds402::isEnabled(0x0027) && !ds402::isEnabled(0x0023) &&
+            ds402::isFault(0x0008) && !ds402::isFault(0x0027);
+
+        std::fputs(QStringLiteral("UITEST ecServo ok=%1\n").arg(ecServoOk ? 1 : 0)
+                       .toLocal8Bit().constData(), stdout);
+
+        // 未选网卡时「打开+配置」应安全返回（不卡死、不崩溃）
+        if (jOpen) jOpen->click();
+    }
+    ok = ok && ecServoOk;
+
+    // ---- 固件版本比对（关于）：设备版本与内置最新固件比对 ----
+    bool fwCmpOk = false;
+    {
+        fwCmpOk = MainWindow::firmwareStatusNote(QStringLiteral("v30.0.5-keil")) == QStringLiteral("（固件最新）")
+                && MainWindow::firmwareStatusNote(QStringLiteral("30.0.5"))       == QStringLiteral("（固件最新）")
+                && MainWindow::firmwareStatusNote(QStringLiteral("v30.0.4-abc"))  == QStringLiteral("（固件可更新）")
+                && MainWindow::firmwareStatusNote(QStringLiteral("")).isEmpty();
+        std::fputs(QStringLiteral("UITEST fwVersion ok=%1\n").arg(fwCmpOk ? 1 : 0)
+                       .toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && fwCmpOk;
+
+    // ---- 列表窗口高度可调：每个含列表的页都有 [列表|日志] 垂直分隔条，日志最少一行 ----
+    bool listSplitOk = false;
+    {
+        const QList<QSplitter *> sps = w.findChildren<QSplitter *>(QStringLiteral("listLogSplit"));
+        listSplitOk = sps.size() >= 2;                 // 通用发送列表 + CANopen 命令列表
+        for (QSplitter *sp : sps) {
+            if (sp->orientation() != Qt::Vertical || sp->count() != 2) { listSplitOk = false; break; }
+            if (!w.findChild<QPlainTextEdit *>("log") &&
+                !w.findChild<QPlainTextEdit *>("log3")) { /* 日志存在即可 */ }
+        }
+        // 日志的最小高度应≈一行（不会被拖动压没）
+        if (auto *lg = w.findChild<QPlainTextEdit *>(QStringLiteral("log")))
+            listSplitOk = listSplitOk && lg->minimumHeight() > 0 &&
+                          lg->minimumHeight() <= lg->fontMetrics().height() + 16;
+        std::fputs(QStringLiteral("UITEST listSplit ok=%1 n=%2\n")
+                       .arg(listSplitOk ? 1 : 0).arg(sps.size())
+                       .toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && listSplitOk;
+
+    // ---- ESI XML 解析：对象字典 + RxPdo/TxPdo + 控制字/状态字偏移 ----
+    bool esiOk = false;
+    {
+        const QByteArray xml =
+            "<EtherCATInfo><Devices><Device><Name>TestDrive</Name>"
+            "<Profile><Dictionary><Objects>"
+            "<Object><Index>#x6040</Index><Name>Control Word</Name><Type>UINT</Type><BitSize>16</BitSize>"
+            "<Flags><Access>rw</Access></Flags><Info><DefaultData>0600</DefaultData></Info></Object>"
+            "<Object><Index>#x6060</Index><Name>Modes of operation</Name><Type>SINT</Type><BitSize>8</BitSize></Object>"
+            "</Objects></Dictionary></Profile>"
+            "<RxPdo Sm=\"2\"><Index>#x1600</Index><Name>Outputs</Name>"
+            "<Entry><Index>#x6040</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>CW</Name></Entry>"
+            "<Entry><Index>#x607A</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>Target</Name></Entry>"
+            "</RxPdo>"
+            "<TxPdo Sm=\"3\"><Index>#x1A00</Index><Name>Inputs</Name>"
+            "<Entry><Index>#x6061</Index><SubIndex>0</SubIndex><BitLen>8</BitLen><Name>Mode</Name></Entry>"
+            "<Entry><Index>#x6041</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>SW</Name></Entry>"
+            "</TxPdo>"
+            "</Device></Devices></EtherCATInfo>";
+        EsiXmlData d; QString err;
+        const bool parsed = parseEsiXml(xml, &d, &err);
+        esiOk = parsed
+                && d.objects.size() == 2
+                && d.findObject(0x6040, 0) != nullptr
+                && d.findObject(0x6040, 0)->name == QStringLiteral("Control Word")
+                && d.findObject(0x6040, 0)->def == QByteArray::fromHex("0600")
+                && d.rxPdos.size() == 1 && d.txPdos.size() == 1
+                && d.rxPdos.first().index == 0x1600 && d.rxPdos.first().sm == 2
+                && d.rxPdos.first().entries.size() == 2
+                && d.controlwordByteOffset() == 0     // 0x6040 是第一个 entry
+                && d.statuswordByteOffset() == 1;     // 0x6041 在第 2 个 entry（前有 8bit → 1 字节）
+        std::fputs(QStringLiteral("UITEST esi ok=%1 objs=%2 rx=%3 tx=%4 cw=%5 sw=%6\n")
+                       .arg(esiOk ? 1 : 0).arg(d.objects.size()).arg(d.rxPdos.size())
+                       .arg(d.txPdos.size()).arg(d.controlwordByteOffset()).arg(d.statuswordByteOffset())
+                       .toLocal8Bit().constData(), stdout);
+
+        // 可选：对真实 ESI 文件做一次解析（CANABLE_TEST_ESI=<path>）
+        const QByteArray esiPath = qgetenv("CANABLE_TEST_ESI");
+        if (!esiPath.isEmpty()) {
+            EsiXmlData rd; QString rerr;
+            const bool okF = loadEsiXml(QString::fromLocal8Bit(esiPath), &rd, &rerr);
+            std::fputs(QStringLiteral("UITEST esi-file ok=%1 objs=%2 rx=%3 tx=%4 cw=%5 sw=%6 dev=%7\n")
+                           .arg(okF ? 1 : 0).arg(rd.objects.size()).arg(rd.rxPdos.size())
+                           .arg(rd.txPdos.size()).arg(rd.controlwordByteOffset()).arg(rd.statuswordByteOffset())
+                           .arg(rd.device).toLocal8Bit().constData(), stdout);
+            esiOk = esiOk && okF && !rd.objects.isEmpty() && !rd.rxPdos.isEmpty();
+        }
+    }
+    ok = ok && esiOk;
 
     // ---- 协议页面栈：CyberBeast / Simple / Open 三页，菜单切换 ----
     bool protoOk = false;
@@ -558,10 +802,11 @@ static int runUiTest()
         auto *funcBox= w.findChild<QComboBox *>(QStringLiteral("coFuncBox"));
         auto *prev   = w.findChild<QLineEdit *>(QStringLiteral("coPreview"));
         auto *sendB  = w.findChild<QPushButton *>(QStringLiteral("coSendBtn"));
+        auto *sendOne = w.findChild<QPushButton *>(QStringLiteral("coSendSingleBtn"));
         auto *odB    = w.findChild<QPushButton *>(QStringLiteral("coOdBrowserBtn"));
         auto *rxT    = w.findChild<QTableWidget *>(QStringLiteral("coRxTable"));
         auto *scr    = w.findChild<QTableWidget *>(QStringLiteral("coScroll"));
-        coOk = stack && page && nodeEd && funcBox && prev && sendB && odB && rxT && scr &&
+        coOk = stack && page && nodeEd && funcBox && prev && sendB && sendOne && odB && rxT && scr &&
                funcBox->count() == 12 + canopen::examples().size();
         if (coOk) {
             if (auto *a = w.findChild<QAction *>(QStringLiteral("actionProtoOpen"))) a->trigger();
@@ -900,6 +1145,72 @@ static int runUiTest()
                                    prev->text().contains(QStringLiteral("→"));
                     } else { coListOk = false; }
                 }
+                // 5) 单条发送：取参数框当前配置的命令，与命令列表选中无关
+                if (coListOk) {
+                    funcBox->setCurrentIndex(funcBox->findData((int)canopen::F_RSDO));
+                    auto *idx5 = w.findChild<QComboBox *>(QStringLiteral("coSdoIdxBox"));
+                    if (idx5 && idx5->findData((uint)(0x6040u << 8)) >= 0)
+                        idx5->setCurrentIndex(idx5->findData((uint)(0x6040u << 8)));
+                    if (auto *v5 = w.findChild<QLineEdit *>(QStringLiteral("coSdoValueEdit")))
+                        v5->setText(QStringLiteral("6"));
+                    // 故意把列表选中设成第 1 项(NMT)，单条发送应不受其影响
+                    lst->setCurrentRow(0);
+                    const QVector<QByteArray> oneFrames = w.coSingleCommandFrames();
+                    bool oneOk = oneFrames.size() == 1;
+                    if (oneOk) {
+                        proto::RxFrame rx;
+                        oneOk = proto::decodeDataFrame(oneFrames.first(), &rx) &&
+                                rx.id == 0x601u;   // 参数框 RSDO 写 6040h 的 COB-ID
+                    }
+                    coListOk = coListOk && oneOk;
+
+                    // SDO 写首字节应随对象数据类型变化（VAR 对象 + 记录子项）
+                    auto *val5 = w.findChild<QLineEdit *>(QStringLiteral("coSdoValueEdit"));
+                    auto *op5  = w.findChild<QComboBox *>(QStringLiteral("coSdoOpBox"));
+                    if (idx5 && val5 && lst) {
+                        auto firstByte = [&](quint16 obj, int sub, bool *okp) -> int {
+                            const uint key = (uint)((obj << 8) | (sub & 0xFF));
+                            if (idx5->findData(key) >= 0) idx5->setCurrentIndex(idx5->findData(key));
+                            if (op5) op5->setCurrentIndex(0);   // 强制「写」以测命令码（与访问类型无关）
+                            const QVector<QByteArray> fr = w.coSingleCommandFrames();
+                            proto::RxFrame rx;
+                            if (okp) *okp = (!fr.isEmpty() && proto::decodeDataFrame(fr.first(), &rx));
+                            return (okp && *okp) ? (int)(quint8)rx.data.at(0) : -1;
+                        };
+                        bool o1=false,o2=false,o3=false,o4=false,o5=false,o6=false;
+                        const int b6040 = firstByte(0x6040, 0, &o1);   // UINT16 → 0x2B
+                        const int b6060 = firstByte(0x6060, 0, &o2);   // INT8   → 0x2F
+                        const int b6071 = firstByte(0x6071, 0, &o3);   // INT16  → 0x2B
+                        const int b608f0 = firstByte(0x608F, 0, &o4);  // UINT8  → 0x2F
+                        const int b6098 = firstByte(0x6098, 0, &o5);   // ?
+                        const int b2002 = firstByte(0x2002, 1, &o6);   // UINT16 → 0x2B
+                        std::fputs(QStringLiteral("UITEST sdoFirstByte 6040=%1 6060=%2 6071=%3 608F0=%4 6098=%5 2002:1=%6\n")
+                                       .arg(b6040).arg(b6060).arg(b6071).arg(b608f0).arg(b6098).arg(b2002)
+                                       .toLocal8Bit().constData(), stdout);
+                        // 首字节=命令码：UINT16/INT16→0x2B, INT8/UINT8→0x2F
+                        coListOk = coListOk && o1 && o2 && o3 && o4 && o5 && o6 &&
+                                   b6040 == 0x2B && b6060 == 0x2F && b6071 == 0x2B &&
+                                   b608f0 == 0x2F && b6098 == 0x2F && b2002 == 0x2B;
+                    }
+                    // 按 EDS 访问类型约束读/写：ro(0x1001) 禁用「写」，rw(0x6040) 都可选
+                    if (idx5 && op5) {
+                        auto *mdl = qobject_cast<QStandardItemModel *>(op5->model());
+                        if (idx5->findData((uint)(0x1001u << 8)) >= 0) {
+                            idx5->setCurrentIndex(idx5->findData((uint)(0x1001u << 8)));
+                            const bool roWriteOff = mdl && mdl->item(0) && !mdl->item(0)->isEnabled();
+                            const bool roReadOn   = mdl && mdl->item(1) && mdl->item(1)->isEnabled();
+                            const bool flipped    = op5->currentData().toInt() == 1;   // 自动切到「读」
+                            coListOk = coListOk && roWriteOff && roReadOn && flipped;
+                        }
+                        if (idx5->findData((uint)(0x6040u << 8)) >= 0) {
+                            idx5->setCurrentIndex(idx5->findData((uint)(0x6040u << 8)));
+                            const bool rwBoth = mdl && mdl->item(0)->isEnabled() && mdl->item(1)->isEnabled();
+                            coListOk = coListOk && rwBoth;
+                        }
+                        std::fputs(QStringLiteral("UITEST sdoAccess ro-disables-write/rw-both ok=%1\n")
+                                       .arg(coListOk ? 1 : 0).toLocal8Bit().constData(), stdout);
+                    }
+                }
             }
         }
         QString line = QStringLiteral("UITEST canopen list ok=%1").arg(coListOk ? 1 : 0);
@@ -988,7 +1299,7 @@ static int runUiTest()
                    .arg(logClean ? 1 : 0).arg(scrollOk ? 1 : 0)
                    .toLocal8Bit().constData(), stdout);
     std::fputs(QStringLiteral("UITEST firstFlush : %1\n")
-                   .arg(QString::fromLatin1(firstFlush.toHex(' ').toUpper()))
+                   .arg(QString::fromLatin1(listFlush.toHex(' ').toUpper()))
                    .toLocal8Bit().constData(), stdout);
     std::fputs(QStringLiteral("UITEST rxRows=%1 rxOk=%2 noGrid=%3\n")
                    .arg(rxRows).arg(rxOk ? 1 : 0).arg(noGrid ? 1 : 0)
@@ -1160,9 +1471,145 @@ static int runDfuSelfTest()
     return fail == 0 ? 0 : 1;
 }
 
-int main(int argc, char *argv[])
+// 无头 EtherCAT 联调：host.exe --ectest <网卡名>  （需要管理员 + Npcap + 从站）
+// 走完整 SOEM 时序：open → config_init → config_map(+blockLRW/DC) → SAFE-OP 预热 → OP，
+// 逐步打印状态 / AL 状态码 / WKC，用于判断是上位机兼容问题还是命令格式问题。
+static int runEcTest(const QString &iface)
 {
-    // 协议自检：host.exe --selftest  （不开窗口，跑完即退）
+    auto out = [](const QString &s) { std::fputs(s.toLocal8Bit().constData(), stdout); std::fputc('\n', stdout); };
+    out(QStringLiteral("EC-TEST iface=%1").arg(iface));
+
+    EtherCatLink ec;
+    if (qgetenv("CANABLE_EC_NO_DC") == QByteArray("1")) ec.setUseDc(false);
+    if (!ec.open(iface)) { out(QStringLiteral("EC-TEST: 打开网卡失败")); return 1; }
+    const int n = ec.scanSlaves();
+    out(QStringLiteral("EC-TEST slaves=%1").arg(n));
+    if (n <= 0) { ec.close(); out(QStringLiteral("EC-TEST: 未发现从站（检查网线/链路/独占）")); return 1; }
+
+    for (int i = 1; i <= n; ++i) {
+        const EcSlaveInfo s = ec.slave(i);
+        out(QStringLiteral("EC-TEST slave %1: %2 state=%3 AL=0x%4 O=%5 I=%6 vid=0x%7 pid=0x%8")
+                .arg(i).arg(s.name).arg(EtherCatLink::stateName(s.state))
+                .arg(s.alStatus, 4, 16, QLatin1Char('0')).arg(s.obits).arg(s.ibits)
+                .arg(s.vendorId, 8, 16, QLatin1Char('0')).arg(s.productId, 8, 16, QLatin1Char('0')));
+    }
+
+    ec.mapProcessData();   // 含 blockLRW + DC 配置
+    out(QStringLiteral("EC-TEST mapped(1): expectedWkc=%1 slaveO=%2 slaveI=%3 slaveState=%4")
+            .arg(ec.expectedWkc()).arg(ec.slave(1).obits).arg(ec.slave(1).ibits)
+            .arg(EtherCatLink::stateName(ec.slaveState(1))));
+
+    // 诊断/修复：该驱动冷启动 0x1C12:00=0（无 RxPDO 分配）→ 主站映射为空 → 停在 PRE/SAFE-OP。
+    // 关键：PDO 分配只能在 PRE-OP 改（映射后处于 SAFE-OP，写不进）。先回 PRE-OP 再写，然后重新映射。
+    {
+        ec.requestState(EtherCatLink::ECST_PREOP, 3000);
+        QString we;
+        ec.sdoWriteUInt(1, 0x1C12, 0x00, 1, 0,      &we);
+        ec.sdoWriteUInt(1, 0x1C12, 0x01, 2, 0x1600, &we);
+        ec.sdoWriteUInt(1, 0x1C12, 0x00, 1, 1,      &we);
+        ec.sdoWriteUInt(1, 0x1C13, 0x00, 1, 0,      &we);
+        ec.sdoWriteUInt(1, 0x1C13, 0x01, 2, 0x1A00, &we);
+        ec.sdoWriteUInt(1, 0x1C13, 0x00, 1, 1,      &we);
+        ec.sdoWriteUInt(1, 0x6060, 0x00, 1, 8,      &we);   // CSP
+        quint32 v = 0;
+        ec.sdoReadUInt(1, 0x1C12, 0, 1, &v, &we);
+        out(QStringLiteral("EC-TEST PRE-OP 写入后 0x1C12:00 = %1").arg(int(v)));
+    }
+    ec.mapProcessData();   // 重新映射（此时应得到非零 O/I）
+    {
+        const EcSlaveInfo s = ec.slave(1);
+        out(QStringLiteral("EC-TEST mapped(2): expectedWkc=%1 slaveO=%2 slaveI=%3")
+                .arg(ec.expectedWkc()).arg(s.obits).arg(s.ibits));
+    }
+
+    const bool op = ec.requestState(EtherCatLink::ECST_OP, 5000);
+    out(QStringLiteral("EC-TEST request OP: ok=%1 masterState=%2")
+            .arg(op ? 1 : 0).arg(EtherCatLink::stateName(ec.currentState())));
+    for (int i = 1; i <= n; ++i)
+        out(QStringLiteral("EC-TEST slave %1 after: state=%2 AL=0x%3")
+                .arg(i).arg(EtherCatLink::stateName(ec.slaveState(i)))
+                .arg(ec.slaveAlStatus(i), 4, 16, QLatin1Char('0')));
+
+    // 分步：显式 SAFE-OP → 打印 → OP → 打印（定位卡在哪一级）
+    ec.requestState(EtherCatLink::ECST_SAFEOP, 3000);
+    out(QStringLiteral("EC-TEST after SAFE-OP: slaveState=%1 AL=0x%2")
+            .arg(EtherCatLink::stateName(ec.slaveState(1)))
+            .arg(ec.slaveAlStatus(1), 4, 16, QLatin1Char('0')));
+    const bool op2 = ec.requestState(EtherCatLink::ECST_OP, 8000);
+    out(QStringLiteral("EC-TEST after OP(2): ok=%1 slaveState=%2 AL=0x%3")
+            .arg(op2 ? 1 : 0).arg(EtherCatLink::stateName(ec.slaveState(1)))
+            .arg(ec.slaveAlStatus(1), 4, 16, QLatin1Char('0')));
+
+    for (int k = 0; k < 5; ++k) {
+        ec.sendProcessData();
+        const int wkc = ec.receiveProcessData(2000);
+        out(QStringLiteral("EC-TEST WKC=%1 / 期望 %2").arg(wkc).arg(ec.expectedWkc()));
+    }
+
+    ec.close();
+    out(op ? QStringLiteral("EC-TEST: OP OK") : QStringLiteral("EC-TEST: OP FAILED"));
+    return op ? 0 : 1;
+}
+
+// 用厂商 joint-sdk 走完整生命周期（configure→activate=OP）做无头验证：
+//   host.exe --jointtest <网卡名> [esi.xml]
+static int runJointTest(const QString &iface, const QString &esi)
+{
+    auto out = [](const QString &s) { std::fputs(s.toLocal8Bit().constData(), stdout); std::fputc('\n', stdout); };
+    out(QStringLiteral("JOINT-TEST iface=%1 esi=%2").arg(iface, esi.isEmpty() ? QStringLiteral("(builtin)") : esi));
+
+    // 运行期数据（dc_timing.conf / ESI）拷贝在 exe 旁 joint_sdk/ 下
+    const QString base = QCoreApplication::applicationDirPath() + QStringLiteral("/joint_sdk");
+    qputenv("JSDK_DC_TIMING_CONF", (base + QStringLiteral("/config/dc_timing.conf")).toLocal8Bit());
+
+    jsdk_context_config_t cfg; jsdk_context_config_default(&cfg);
+    std::snprintf(cfg.ifname, sizeof(cfg.ifname), "%s", iface.toLocal8Bit().constData());
+    jsdk_context_t *ctx = jsdk_context_create(&cfg);
+    if (!ctx) { out(QStringLiteral("JOINT-TEST: context_create 失败（网卡名/权限？）")); return 1; }
+
+    jsdk_joint_config_t jc; jsdk_joint_config_default(&jc);
+    jc.position = 1;
+    const QByteArray esiBa = esi.toLocal8Bit();
+    jc.profile_name = esi.isEmpty() ? nullptr : esiBa.constData();
+    jsdk_joint_t *joint = nullptr;
+    if (jsdk_context_add_joint(ctx, &jc, &joint) != JSDK_OK) {
+        out(QStringLiteral("JOINT-TEST: add_joint 失败：%1").arg(QString::fromLocal8Bit(jsdk_context_last_error(ctx))));
+        jsdk_context_destroy(ctx); return 1;
+    }
+
+    if (jsdk_context_configure(ctx) != JSDK_OK) {
+        out(QStringLiteral("JOINT-TEST: configure 失败：%1").arg(QString::fromLocal8Bit(jsdk_context_last_error(ctx))));
+        jsdk_context_destroy(ctx); return 1;
+    }
+    out(QStringLiteral("JOINT-TEST: configured (SAFE_OP)"));
+
+    if (jsdk_context_activate(ctx) != JSDK_OK) {
+        out(QStringLiteral("JOINT-TEST: activate(OP) 失败：%1").arg(QString::fromLocal8Bit(jsdk_context_last_error(ctx))));
+        jsdk_context_destroy(ctx); return 1;
+    }
+    out(QStringLiteral("JOINT-TEST: activated (OPERATIONAL)"));
+
+    // 跑若干周期，读反馈
+    jsdk_joint_feedback_t fb{};
+    for (int i = 0; i < 50; ++i) {
+        jsdk_context_cycle_begin(ctx, (uint64_t)i);
+        jsdk_joint_get_feedback(joint, &fb);
+        jsdk_context_cycle_end(ctx);
+    }
+    jsdk_bus_state_t bus{};
+    jsdk_context_get_bus_state(ctx, &bus);
+    out(QStringLiteral("JOINT-TEST: fb status=0x%1 mode=%2 pos=%3 online=%4 op=%5 al=%6 | WKC=%7")
+            .arg(fb.statusword, 4, 16, QLatin1Char('0')).arg(fb.mode_display).arg(fb.actual_position)
+            .arg(fb.online).arg(fb.operational).arg(fb.al_state).arg(bus.working_counter));
+
+    jsdk_context_deactivate(ctx);
+    jsdk_context_destroy(ctx);
+    out(QStringLiteral("JOINT-TEST: OP OK"));
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{    // 协议自检：host.exe --selftest  （不开窗口，跑完即退）
     for (int i = 1; i < argc; i++) {
         if (QString::fromLocal8Bit(argv[i]) == "--selftest") {
             QString report;
@@ -1297,7 +1744,25 @@ int main(int argc, char *argv[])
     // 无头逻辑自测：host.exe --uitest
     for (int i = 1; i < argc; i++) {
         if (QString::fromLocal8Bit(argv[i]) == "--uitest")
-            return runUiTest();
+            return runUiTest();    }
+
+    // EtherCAT 无头联调：host.exe --ectest <网卡名>
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--ectest") {
+            const QString iface = (i + 1 < argc) ? QString::fromLocal8Bit(argv[i + 1]) : QString();
+            if (iface.isEmpty()) { std::fputs("usage: --ectest <pcap-device-name>\n", stdout); return 1; }
+            return runEcTest(iface);
+        }
+    }
+
+    // 厂商 joint-sdk 生命周期验证：host.exe --jointtest <网卡名> [esi.xml]
+    for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--jointtest") {
+            const QString iface = (i + 1 < argc) ? QString::fromLocal8Bit(argv[i + 1]) : QString();
+            const QString esi   = (i + 2 < argc) ? QString::fromLocal8Bit(argv[i + 2]) : QString();
+            if (iface.isEmpty()) { std::fputs("usage: --jointtest <pcap-device-name> [esi.xml]\n", stdout); return 1; }
+            return runJointTest(iface, esi);
+        }
     }
 
     // GUI 烧机自检：host.exe --guitest

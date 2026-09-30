@@ -38,6 +38,8 @@ private:
     QLineEdit    *m_value = nullptr;
     QComboBox    *m_typeBox = nullptr;
     QLabel       *m_hint = nullptr;
+    QPushButton  *m_readBtn = nullptr;
+    QPushButton  *m_writeBtn = nullptr;
 
     struct Row { quint16 index; int sub; };
     QVector<Row> m_rows;   // 当前显示行 → 对象
