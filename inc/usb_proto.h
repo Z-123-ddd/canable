@@ -12,12 +12,16 @@
  *    byte0: cmd id (1 = set nominal bitrate)
  *    byte1..4: 32-bit unsigned value, little-endian (value = bitrate in Hz)
  *
- * Data frame payload (max 72 bytes):
- *    AA AB | CTRL(1) | ID(2 or 4, BE) | DATA(0..64) | CRC(2 or 3)
+ * Data frame payload (max 69 bytes):
+ *    AA AB | CTRL(1) | ID(2 or 4, BE) | DATA(0..64)
  *    CTRL bits:
  *      bit7 FDF, bit6 BRS, bit5 RTR, bit4 IDE (1=extended 4B ID / 0=standard 2B),
  *      bit3..0 DLC code (0..15)
- *    CRC covers CTRL + ID + DATA (excludes the AA AB header).
+ *
+ * No application CRC on data frames: USB bulk transfers already carry a
+ * per-packet CRC16 with automatic retry, so the link is lossless and the
+ * checksum only wasted 2 (classic) / 3 (FD) bytes on every CAN report.
+ * The rare AA AC / AA AD diagnostic frames keep their CRC-8.
  *
  * USB packet boundaries are ignored: the parser is a byte stream and a
  * frame may span several 64-byte USB packets.
@@ -81,6 +85,10 @@
 //          frame survives into the resumed session.
 #define USB_PROTO_CMD_ID_SET_PAUSE    11
 
+//   id 12: clear the firmware's sticky error register and drop queued AA AD
+//          reports. No value. Useful to reset err= after a transient fault.
+#define USB_PROTO_CMD_ID_CLEAR_ERRORS 12
+
 // Allowed range (ms) for the SET_INTERVAL command value.
 #define USB_PROTO_TX_INTERVAL_MIN_MS  1U
 #define USB_PROTO_TX_INTERVAL_MAX_MS  1000U
@@ -99,9 +107,9 @@
 
 #define USB_PROTO_MAX_ID_BYTES 4U
 #define USB_PROTO_MAX_DATA     64U
-#define USB_PROTO_MAX_CRC      3U
-#define USB_PROTO_MAX_PAYLOAD  (USB_PROTO_MAX_ID_BYTES + 1 + USB_PROTO_MAX_DATA + USB_PROTO_MAX_CRC)  // 72
-#define USB_PROTO_MAX_FRAME    (2U + USB_PROTO_MAX_PAYLOAD)                                          // 74
+#define USB_PROTO_MAX_CRC      0U   // AA AB data frames carry no application CRC
+#define USB_PROTO_MAX_PAYLOAD  (USB_PROTO_MAX_ID_BYTES + 1 + USB_PROTO_MAX_DATA)   // 69
+#define USB_PROTO_MAX_FRAME    (2U + USB_PROTO_MAX_PAYLOAD)                        // 71
 
 
 // ---- CRC ----
@@ -112,9 +120,8 @@
 //   FD data >  16B : CRC-21/CAN-FD(21 bits) -> 3 bytes, right aligned
 // All: MSB-first, init 0x00000000, xorout 0, no reflection, no bit
 // stuffing (transport CRC, MUST match the host implementation).
-#define USB_PROTO_CRC15_POLY   0x4599U     // x^15+x^14+x^10+x^8+x^7+x^4+x^3+1  (x^15 term omitted)
-#define USB_PROTO_CRC17_POLY   0x1685BU    // CAN FD CRC-17 register constant (x^17 term omitted)
-#define USB_PROTO_CRC21_POLY   0x102899U   // CAN FD CRC-21 register constant (x^21 term omitted)
+// (The CAN CRC15/17/21 polynomials and the AA AB frame CRC were removed; only
+//  the CRC-8 used by AA AC / AA AD diagnostic frames remains.)
 
 
 // ---- API ----

@@ -7,6 +7,7 @@
 
 #include "usbfsd_lib.h"
 #include "usb_desc.h"
+#include "usb_conf.h"
 
 /* USB Standard Device Descriptor */
 const uint8_t Virtual_Com_Port_DeviceDescriptor[] =
@@ -14,8 +15,8 @@ const uint8_t Virtual_Com_Port_DeviceDescriptor[] =
     0x12,                       /* bLength */
     USB_DEVICE_DESCRIPTOR_TYPE, /* bDescriptorType */
     0x00, 0x02,                 /* bcdUSB = 2.00 */
-    0x02,                       /* bDeviceClass: CDC */
-    0x02,                       /* bDeviceSubClass */
+    0xFF,                       /* bDeviceClass: vendor specific */
+    0x00,                       /* bDeviceSubClass */
     0x00,                       /* bDeviceProtocol */
     0x40,                       /* bMaxPacketSize0 = 64 */
     0xD0, 0x16,                 /* idVendor  = 0x16D0 (Openlight Labs) */
@@ -27,8 +28,16 @@ const uint8_t Virtual_Com_Port_DeviceDescriptor[] =
     0x01                        /* bNumConfigurations */
 };
 
-/* USB Configuration + Interface + Endpoint Descriptors (CDC ACM)
- * Matches STM32 usbd_cdc.c USBD_CDC_CfgFSDesc exactly. */
+/* USB Configuration + Interface + Endpoint Descriptors (vendor specific)
+ *
+ * Class code 0xFF with a single data interface: no CDC ACM wrapper, no
+ * notification endpoint, no class requests.  Both bulk endpoints keep their
+ * original addresses (0x01 OUT / 0x81 IN) so host code and the existing
+ * libusb binding (matched on VID/PID) are unaffected.
+ *
+ * MS OS 2.0 descriptors (see usb_prop.c) tell Windows to bind WinUSB
+ * automatically, so no Zadig step is needed on a fresh machine.
+ */
 const uint8_t Virtual_Com_Port_ConfigDescriptor[] =
 {
     /* ---------- Configuration Descriptor ---------- */
@@ -36,64 +45,19 @@ const uint8_t Virtual_Com_Port_ConfigDescriptor[] =
     USB_CONFIGURATION_DESCRIPTOR_TYPE,      /* bDescriptorType: Configuration */
     VIRTUAL_COM_PORT_SIZ_CONFIG_DESC,       /* wTotalLength (LSB) */
     0x00,                                   /* wTotalLength (MSB) */
-    0x02,                                   /* bNumInterfaces: 2 */
+    0x01,                                   /* bNumInterfaces: 1 */
     0x01,                                   /* bConfigurationValue */
     0x00,                                   /* iConfiguration */
     0x80,                                   /* bmAttributes: bus powered */
     0xFA,                                   /* bMaxPower: 500mA */
 
-    /* ---------- Interface 0: Communication Class ---------- */
+    /* ---------- Interface 0: Vendor Specific ---------- */
     0x09,                               /* bLength */
     USB_INTERFACE_DESCRIPTOR_TYPE,      /* bDescriptorType: Interface */
     0x00,                               /* bInterfaceNumber */
     0x00,                               /* bAlternateSetting */
-    0x01,                               /* bNumEndpoints: 1 (interrupt IN) */
-    0x02,                               /* bInterfaceClass: CDC Communication */
-    0x02,                               /* bInterfaceSubClass: ACM */
-    0x01,                               /* bInterfaceProtocol: AT commands */
-    0x00,                               /* iInterface */
-
-    /* Header Functional Descriptor */
-    0x05,   /* bLength */
-    0x24,   /* bDescriptorType: CS_INTERFACE */
-    0x00,   /* bDescriptorSubtype: Header */
-    0x10, 0x01,                         /* bcdCDC: 1.10 */
-
-    /* Call Management Functional Descriptor */
-    0x05,   /* bLength */
-    0x24,   /* bDescriptorType: CS_INTERFACE */
-    0x01,   /* bDescriptorSubtype: Call Management */
-    0x00,   /* bmCapabilities */
-    0x01,   /* bDataInterface: 1 */
-
-    /* ACM Functional Descriptor */
-    0x04,   /* bLength */
-    0x24,   /* bDescriptorType: CS_INTERFACE */
-    0x02,   /* bDescriptorSubtype: ACM */
-    0x02,   /* bmCapabilities: line coding + serial state */
-
-    /* Union Functional Descriptor */
-    0x05,   /* bLength */
-    0x24,   /* bDescriptorType: CS_INTERFACE */
-    0x06,   /* bDescriptorSubtype: Union */
-    0x00,   /* bMasterInterface: 0 (communication) */
-    0x01,   /* bSlaveInterface:  1 (data) */
-
-    /* Endpoint 2 IN (interrupt) */
-    0x07,                               /* bLength */
-    USB_ENDPOINT_DESCRIPTOR_TYPE,       /* bDescriptorType: Endpoint */
-    0x82,                               /* bEndpointAddress: EP2 IN */
-    0x03,                               /* bmAttributes: Interrupt */
-    VIRTUAL_COM_PORT_INT_SIZE, 0x00,    /* wMaxPacketSize: 8 */
-    0x10,                               /* bInterval: 16ms */
-
-    /* ---------- Interface 1: Data Class ---------- */
-    0x09,                               /* bLength */
-    USB_INTERFACE_DESCRIPTOR_TYPE,      /* bDescriptorType: Interface */
-    0x01,                               /* bInterfaceNumber */
-    0x00,                               /* bAlternateSetting */
-    0x02,                               /* bNumEndpoints: 2 (Bulk IN/OUT) */
-    0x0A,                               /* bInterfaceClass: CDC Data */
+    0x02,                               /* bNumEndpoints: 2 (bulk OUT + IN) */
+    0xFF,                               /* bInterfaceClass: vendor specific */
     0x00,                               /* bInterfaceSubClass */
     0x00,                               /* bInterfaceProtocol */
     0x00,                               /* iInterface */
@@ -106,13 +70,66 @@ const uint8_t Virtual_Com_Port_ConfigDescriptor[] =
     VIRTUAL_COM_PORT_DATA_SIZE, 0x00,   /* wMaxPacketSize: 64 */
     0x00,                               /* bInterval (ignored for bulk) */
 
-    /* Endpoint 1 IN (bulk, device -> host) */
+    /* Data uplink endpoint.  Default EP1 IN (0x81); the experimental
+     * double-buffered build uses EP3 IN. */
     0x07,                               /* bLength */
     USB_ENDPOINT_DESCRIPTOR_TYPE,       /* bDescriptorType: Endpoint */
+#if CDC_TX_USE_DBUF
+    0x83,                               /* bEndpointAddress: EP3 IN */
+#else
     0x81,                               /* bEndpointAddress: EP1 IN */
+#endif
     0x02,                               /* bmAttributes: Bulk */
     VIRTUAL_COM_PORT_DATA_SIZE, 0x00,   /* wMaxPacketSize: 64 */
     0x00,                               /* bInterval (ignored for bulk) */
+};
+
+/* ---------- MS OS 2.0 (WCID) descriptors --------------------------------
+ *
+ * Windows asks for string descriptor 0xEE, we answer "MSFT100" plus the
+ * vendor request code it should use.  It then issues that vendor request with
+ * wIndex = 7 (MS_OS_20_DESCRIPTOR_INDEX) and expects the descriptor set below.
+ * The CompatibleID "WINUSB" makes Windows load winusb.sys without an INF, which
+ * is what removes the Zadig step.
+ */
+
+/* String 0xEE: bLength | 0x03 | "MSFT100" UTF-16LE | bVendorCode | 0x00 */
+const uint8_t Virtual_Com_Port_StringMSOS[VIRTUAL_COM_PORT_SIZ_STRING_MSOS] =
+{
+    0x12, 0x03,                                           /* bLength=18, STRING */
+    'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0, /* "MSFT100" (7 chars) */
+    USB_MSOS_VENDOR_CODE,                                 /* bVendorCode */
+    0x00                                                  /* bReserved */
+};
+
+/* MS OS 2.0 descriptor set: Set header + Configuration subset + Function
+ * subset with CompatibleID "WINUSB". */
+const uint8_t Virtual_Com_Port_MSOS20DescriptorSet[VIRTUAL_COM_PORT_SIZ_MSOS20] =
+{
+    /* ---- Set Header ---- */
+    0x0A, 0x00,             /* wLength = 10 */
+    0x00, 0x00,             /* wDescriptorType = MS_OS_20_SET_HEADER */
+    0x00, 0x00, 0x03, 0x06, /* dwWindowsVersion = 0x06030000 (Windows 8.1) */
+    VIRTUAL_COM_PORT_SIZ_MSOS20, 0x00,  /* wTotalLength */
+
+    /* ---- Configuration Subset Header ---- */
+    0x08, 0x00,             /* wLength = 8 */
+    0x01, 0x00,             /* wDescriptorType = MS_OS_20_SUBSET_HEADER_CONFIGURATION */
+    0x01,                   /* bConfigurationValue = 1 */
+    0x00,                   /* bReserved */
+    0x20, 0x00,             /* wTotalLength = 32 (8 header + 24 function) */
+
+    /* ---- Function Subset Header ---- */
+    0x08, 0x00,             /* wLength = 8 */
+    0x02, 0x00,             /* wDescriptorType = MS_OS_20_SUBSET_HEADER_FUNCTION */
+    0x00,                   /* bFirstInterface = 0 */
+    0x00,                   /* bReserved */
+    0x18, 0x00,             /* wSubsetLength = 24 (8 header + 8 + 8 ids) */
+
+    /* ---- Compatible ID ("WINUSB") ---- */
+    'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00,
+    /* ---- Sub-Compatible ID (unused) ---- */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 /* ---------- String Descriptors ---------- */

@@ -36,6 +36,9 @@ void error_assert(error_t err);
 void error_raise(error_t err);
 // Clear a sticky error bit (e.g. RX overflow recovered after host drains).
 void error_clear(error_t err);
+// Clear the ENTIRE error register and drop any queued AA AD reports
+// (host "clear errors" command).
+void error_clear_all(void);
 uint32_t error_last_timestamp(void);
 uint32_t error_reg(void);
 

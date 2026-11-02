@@ -141,10 +141,15 @@ void rs485_init(uint32_t baud)
     nvic.NVIC_IRQChannelCmd                = ENABLE;
     NVIC_Init(&nvic);
 
+    /* USART1 is deliberately left DISABLED in the NVIC here: rs485_init() also
+     * runs at boot in CAN mode, and with a floating RS485 RX line the USART
+     * would raise IDLE/error interrupts continuously with nobody servicing them
+     * (USART1_IRQHandler only clears TC), wedging the main loop.  The line is
+     * enabled by rs485_irq_set(ENABLE) when RS485 mode is selected. */
     nvic.NVIC_IRQChannel                   = RS485_USART_IRQn;
     nvic.NVIC_IRQChannelPreemptionPriority = 7;
     nvic.NVIC_IRQChannelSubPriority        = 0;
-    nvic.NVIC_IRQChannelCmd                = ENABLE;
+    nvic.NVIC_IRQChannelCmd                = DISABLE;
     NVIC_Init(&nvic);
 
     USART_ConfigInt(RS485_USART, USART_INT_TXC, DISABLE);   /* enabled per TX */
@@ -186,10 +191,20 @@ uint8_t rs485_tx_busy(void)
 }
 
 
+void rs485_irq_set(int state)
+{
+    if (state != 0)
+        NVIC_EnableIRQ(RS485_USART_IRQn);
+    else
+        NVIC_DisableIRQ(RS485_USART_IRQn);
+}
+
+
 void rs485_stop(void)
 {
     /* Stop the DMA channels, the USART TC interrupt and the USART itself, then
        park DE in the receive state. Safe to call even if never started. */
+    rs485_irq_set(DISABLE);
     DMA_EnableChannel(RS485_TX_DMA, DISABLE);
     DMA_EnableChannel(RS485_RX_DMA, DISABLE);
     USART_ConfigInt(RS485_USART, USART_INT_TXC, DISABLE);

@@ -4,13 +4,13 @@
 
 | 构件 | 版本 | 说明 |
 |------|------|------|
-| 固件 | **v30.0.5** | `Makefile` → `FW_VERSION`；Keil 见 `inc/git_version.h` |
-| 上位机 | **30.0.6** | `host/CMakeLists.txt` / `host/package.sh` |
+| 固件 | **v30.0.7** | `Makefile` → `FW_VERSION`；Keil 见 `inc/git_version.h` |
+| 上位机 | **30.0.9** | `host/CMakeLists.txt` / `host/package.sh` |
 
 发行物（本仓库）：
 
-- 固件：`release/canable2-n32-v30.0.5.bin`（及 `.hex`）
-- 上位机：`host/dist/CyberBeast-ProtocolTool-Setup-30.0.6.exe`、`host/dist/CyberBeast-ProtocolTool-30.0.6-portable.zip`
+- 固件：`release/canable2-n32-v30.0.7.bin`（及 `.hex`）
+- 上位机：`host/dist/CyberBeast-ProtocolTool-Setup-30.0.9.exe`、`host/dist/CyberBeast-ProtocolTool-30.0.9-portable.zip`
 
 ---
 

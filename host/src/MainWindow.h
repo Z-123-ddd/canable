@@ -117,12 +117,18 @@ public:
 
     // 接收区：把一帧写入接收表（按 id 就地更新，不滚动）；供 UI 与无头自测调用
     void feedRx(const proto::RxFrame &f);
+    void feedRxCounted(const proto::RxFrame &f, quint32 hits);
     // 供无头自测：模拟收到一帧（走完整 onFrameReceived 流程：接收表+解析区）
     void simulateRx(const proto::RxFrame &f);
+    void stopRxFlushForTest();              // 仅无头压测用：停掉批量刷新定时器
     int  rxRowCount() const;
     QString rxCellText(int row, int col) const;
     // 接收区：滚动视图文本（供无头自测读取）
     QString scrollText() const;
+    // CANopen 页接收区（供无头自测：滚动模式下的取值与模式切换）
+    void coSetRxModeForTest(bool scroll) { coSetRxMode(scroll); }
+    void coFeedRxForTest(const proto::RxFrame &f) { coFeedRx(f); }
+    QString coScrollCellText(int row, int col) const;
     // 持久化（供无头自测复用；正常由 closeEvent 自动调用）
     void coSyncTransmitFromMapping();   // 执行映射修改后：同步到 PDO 传输区（会话记忆；供自测调用）
     void saveSettings();
@@ -169,6 +175,7 @@ private slots:
     void onSendList();      // 列表发送（取勾选行）
     void onStop();
     void onQueryStatus();
+    void onClearErrors();               // 清除固件内部错误寄存器（命令 12）
     // 帮助：关于（软件版本 + 设备固件版本）
     void onAbout();
 
@@ -197,6 +204,7 @@ private slots:
     void coRemoveListRow(int row);
     void coSnapshotCoList();            // 从控件同步模型（拖动后）
     void coRestoreFromEntry(int row);   // 点击列表项：回填编辑器（供再次修改）
+    void coRestoreScrollPos(int pos);   // 布局重算后恢复命令列表滚动位置
     void coEditEntryBytes(int row);     // 双击列表项：手动编辑该命令的字节内容
     void coMapAddRow();                 // PDO 映射修改：追加一个目标对象
     void coMapRemoveRow(int i);         // PDO 映射修改：删除一个目标对象
@@ -374,6 +382,7 @@ private:
     QPushButton *m_refreshBtn = nullptr;
     QPushButton *m_openBtn = nullptr;
     QPushButton *m_updateFwBtn = nullptr;   // 更新固件（进入 DFU + 烧录）
+    QPushButton *m_clearErrBtn = nullptr;    // 清除错误（命令 12；各页连接区各一份）
 
     // CAN 参数
     QComboBox *m_bitrateBox = nullptr;     // 仲裁域波特率下拉（命令 1）
@@ -551,6 +560,17 @@ private:
     QHash<QString, QTableWidget *> m_parseAreas;             // 协议 key -> 解析区表格
     QHash<QString, QHash<quint32, int>> m_parseRowById;      // 协议 key -> (帧ID -> 行号)，就地更新
     // 接收区缓存上限：≈10MB（按文本字节数计），超出丢弃最旧
+    // ---- 接收批量刷新 ----
+    // 固件在总线繁忙时可达 8000 帧/s。若每帧都跑「4 个接收区 + 4 个协议解析 +
+    // 若干次 setText」，主线程必然卡死（实测直接冻结界面）。这里把帧先压进队列，
+    // 由 33 Hz 定时器一次批处理，帧率与 UI 开销彻底解耦。
+    static constexpr int    kRxFlushIntervalMs = 33;    // ≈30 Hz
+    static constexpr int    kRxQueueCap        = 200000; // 约 20 万帧，防内存失控
+    void flushRxQueue();                                 // 定时器回调：批处理队列
+    QVector<proto::RxFrame> m_rxQueue;                   // 待处理帧
+    QTimer *m_rxFlushTimer = nullptr;
+    quint64 m_rxDroppedByCap = 0;                        // 队列满丢弃计数（可观测）
+
     static constexpr qint64 kRxCacheBytes = 10LL * 1024 * 1024;
     static constexpr int    kRxMaxRows    = 1000000;   // 兜底行数上限（防极端情况下无限增长）
     QLineEdit *m_rxPartialEdit = nullptr;    // (预留)
@@ -578,6 +598,7 @@ private:
     // DFU 设备检测轮询
     QTimer *m_dfuPollTimer = nullptr;
     int m_dfuPollCount = 0;
+    bool m_dfuDialogOpen = false;   // 固件更新对话框已弹出（防定时器重入）
 };
 
 #endif // MAINWINDOW_H

@@ -34,7 +34,6 @@ typedef enum {
     PROTO_DATA_CTRL,    // got AA AB, waiting for CTRL
     PROTO_DATA_ID,      // collecting ID bytes (length from CTRL.IDE)
     PROTO_DATA_BODY,    // collecting data bytes
-    PROTO_DATA_CRC,     // collecting CRC bytes
 } proto_state_t;
 
 
@@ -46,51 +45,12 @@ static uint16_t need;                           // bytes still expected in curre
 static uint8_t id_bytes;                        // 2 or 4 from CTRL.IDE
 static uint8_t ctrl_byte;                       // data-frame control byte
 static uint8_t data_bytes;                      // CAN payload length
-static uint8_t crc_bytes;                       // 2 (classic) or 3 (FD)
-
-
-// ---------------------------------------------------------------------------
-// CRC engines (bit widths 15/17/21), MSB-first, init 0, xorout 0.
-// poly is the register constant with the leading x^N term omitted.
-// ---------------------------------------------------------------------------
-static uint32_t crc_msb_width(const uint8_t *p, uint16_t len, uint8_t width, uint32_t poly)
-{
-    uint32_t crc = 0;
-    const uint32_t top = 1UL << (width - 1);
-    const uint8_t shift = (uint8_t)(width - 8);
-
-    for (uint16_t i = 0; i < len; i++)
-    {
-        crc ^= (uint32_t)p[i] << shift;
-        for (uint8_t b = 0; b < 8; b++)
-        {
-            if (crc & top)
-                crc = (crc << 1) ^ poly;
-            else
-                crc <<= 1;
-        }
-    }
-    if (width == 32)
-        return crc;
-    return crc & ((1UL << width) - 1);
-}
-
-
-// CRC over wire bytes [CTRL | ID | data], contiguous in rxbuf[0..)
-static uint32_t crc_compute(uint8_t ctrl)
-{
-    uint16_t n = (uint16_t)(1u + id_bytes + data_bytes);
-
-    if (ctrl & USB_PROTO_CTRL_FDF)
-        return (data_bytes <= 16U)
-                   ? crc_msb_width(rxbuf, n, 17, USB_PROTO_CRC17_POLY)
-                   : crc_msb_width(rxbuf, n, 21, USB_PROTO_CRC21_POLY);
-    return crc_msb_width(rxbuf, n, 15, USB_PROTO_CRC15_POLY);
-}
 
 
 // Encode a received CAN/FD frame (bus -> USB):
-// AA AB | CTRL | ID(2/4) | DATA | CRC. IDE in CTRL selects ID width.
+// AA AB | CTRL | ID(2/4) | DATA.  IDE in CTRL selects ID width.
+// No CRC: USB bulk transfers are already protected by a per-packet CRC16 and
+// retry, so an application checksum only costs bytes.
 int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
                             const FDCAN_RxHeaderType *hdr, const uint8_t *data)
 {
@@ -117,8 +77,7 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
     if (ext)                                            ctrl |= USB_PROTO_CTRL_IDE;
     ctrl |= dlc;
 
-    uint8_t crcb = fd ? 3u : 2u;
-    uint16_t total = (uint16_t)(2u + 1u + idb + (uint16_t)nbytes + crcb);
+    uint16_t total = (uint16_t)(2u + 1u + idb + (uint16_t)nbytes);
     if (total > max)
         return -1;
 
@@ -137,23 +96,9 @@ int32_t usb_proto_encode_rx(uint8_t *out, uint16_t max,
     for (int8_t j = 0; j < nbytes; j++)
         out[i++] = data[j];
 
-    uint16_t cov = (uint16_t)(1u + idb + (uint16_t)nbytes);
-    uint32_t crc;
-    if (fd)
-        crc = (nbytes <= 16)
-                  ? crc_msb_width(&out[2], cov, 17, USB_PROTO_CRC17_POLY)
-                  : crc_msb_width(&out[2], cov, 21, USB_PROTO_CRC21_POLY);
-    else
-        crc = crc_msb_width(&out[2], cov, 15, USB_PROTO_CRC15_POLY);
-
-    if (fd) {
-        out[i++] = (uint8_t)(crc >> 16);
-        out[i++] = (uint8_t)(crc >> 8);
-        out[i++] = (uint8_t)(crc);
-    } else {
-        out[i++] = (uint8_t)(crc >> 8);
-        out[i++] = (uint8_t)(crc);
-    }
+    /* No application CRC: USB bulk packets already carry a CRC16 with retry,
+     * so the link layer is lossless.  Removing it saves 2 bytes (classic) or 3
+     * bytes (FD) on every single CAN report. */
     return (int32_t)i;
 }
 
@@ -277,6 +222,11 @@ static void proto_cmd_dispatch(void)
             usb_proto_send_version(GIT_VERSION);
             break;
 
+        case USB_PROTO_CMD_ID_CLEAR_ERRORS:
+            // Clear the sticky error register + queued reports.
+            error_clear_all();
+            break;
+
         case USB_PROTO_CMD_ID_SET_PAUSE:
             // value = 1 pause / 0 resume. Stops CAN TX + reception
             // interrupts and flushes the RX queue; other values refused.
@@ -293,22 +243,12 @@ static void proto_cmd_dispatch(void)
 }
 
 
-// Handle a complete data frame: rxbuf = [CTRL | ID.. | data.. | crc..]
+// Handle a complete data frame: rxbuf = [CTRL | ID.. | data..]
+// No application CRC (see encode_rx): USB already guarantees delivery.
 static void proto_data_dispatch(void)
 {
     const uint8_t *idp = &rxbuf[1];
     const uint8_t *datap = &rxbuf[1u + id_bytes];
-    const uint8_t *crcp = datap + data_bytes;
-
-    uint32_t expect = crc_compute(ctrl_byte);
-    uint32_t got = 0;
-    for (uint8_t i = 0; i < crc_bytes; i++)
-        got = (got << 8) | crcp[i];
-    if (got != expect)
-    {
-        error_assert(ERR_USB_CRC);
-        return;
-    }
 
     FDCAN_TxHeaderType hdr;
     memset(&hdr, 0, sizeof(hdr));
@@ -395,7 +335,6 @@ void usb_proto_feed(uint8_t byte)
             }
 
             id_bytes = (ctrl_byte & USB_PROTO_CTRL_IDE) ? 4u : 2u;
-            crc_bytes = (ctrl_byte & USB_PROTO_CTRL_FDF) ? 3u : 2u;
             if ((ctrl_byte & USB_PROTO_CTRL_RTR) && !(ctrl_byte & USB_PROTO_CTRL_FDF))
                 data_bytes = 0;
             else
@@ -417,22 +356,13 @@ void usb_proto_feed(uint8_t byte)
                 }
                 else
                 {
-                    state = PROTO_DATA_CRC;
-                    need = crc_bytes;
+                    proto_data_dispatch();
+                    state = PROTO_IDLE;
                 }
             }
             break;
 
         case PROTO_DATA_BODY:
-            rxbuf[rxlen++] = byte;
-            if (--need == 0)
-            {
-                state = PROTO_DATA_CRC;
-                need = crc_bytes;
-            }
-            break;
-
-        case PROTO_DATA_CRC:
             rxbuf[rxlen++] = byte;
             if (--need == 0)
             {

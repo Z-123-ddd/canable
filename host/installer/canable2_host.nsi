@@ -2,7 +2,7 @@
 ;  CANable2-N32 上位机 安装程序脚本 (NSIS 3.x, Unicode)
 ;  用法（由 host/package.sh 调用）：
 ;    makensis /DDEPLOYDIR=..\build\deploy /DOUTFILE=..\dist\xxx.exe \
-;             /DAPPVER=30.0.4 installer\canable2_host.nsi
+;             /DAPPVER=30.0.9 installer\canable2_host.nsi
 ;
 ;  若检测到已安装版本，自定义页可选：修改 / 修复 / 覆盖
 ; ============================================================================
@@ -22,7 +22,11 @@ Unicode true
   !define OUTFILE "..\dist\CyberBeast-ProtocolTool-Setup.exe"
 !endif
 !ifndef APPVER
-  !define APPVER "30.0.4"
+  !define APPVER "30.0.9"
+!endif
+; 四段版本号（VIProductVersion 强制要求 X.Y.Z.W），由 package.sh 传入
+!ifndef APPVER4
+  !define APPVER4 "${APPVER}.0"
 !endif
 ; 随包内置的 Npcap 安装程序文件名（由 package.sh 用 /DNPCAP_EXE 传入）
 !ifndef NPCAP_EXE
@@ -48,7 +52,7 @@ InstallDirRegKey HKLM "${REGKEY}" "InstallLocation"
 RequestExecutionLevel ${REQLEVEL}
 SetCompressor /SOLID lzma
 
-VIProductVersion "30.0.4.0"
+VIProductVersion "${APPVER4}"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APPNAME} 安装程序"

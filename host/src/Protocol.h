@@ -52,6 +52,7 @@ enum Cmd : uint8_t {
     CMD_SET_WORK_MODE    = 9,  // value: 0=CAN 1=RS485（切换调试器工作模式）
     CMD_GET_VERSION      = 10, // 查询固件版本（回 AA AC RSP_VERSION）
     CMD_SET_PAUSE        = 11, // value: 1=暂停接收（停 CAN 收发中断+清未完成帧） 0=恢复
+    CMD_CLEAR_ERRORS     = 12, // 清除固件内部错误寄存器（无 value）
 };
 
 // 发送模式
@@ -76,12 +77,9 @@ QByteArray buildCommand(Cmd cmd, uint32_t value);
 QByteArray buildDataFrame(uint32_t id, bool ext, bool fd, bool brs, bool rtr,
                           int dlc, const QByteArray &data);
 
-// ---- CRC（供自检）----
-uint32_t crc15(const uint8_t *p, int n);
-uint32_t crc17(const uint8_t *p, int n);
-uint32_t crc21(const uint8_t *p, int n);
-// 按帧类型/长度选择宽度；p 指向被覆盖字节(CTRL+ID+DATA)
-uint32_t crcForFrame(bool fd, int dataBytes, const uint8_t *p, int n);
+// ---- CRC ----
+// (CRC15/17/21 已移除：AA AB 数据帧不再带应用层 CRC，见 Protocol.cpp)
+
 
 // ---- 解析 ----
 struct RxFrame {                 // AA AB（MCU 上报的接收帧）

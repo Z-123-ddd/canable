@@ -35,6 +35,14 @@ inline QString formatHexBytes(const QString &in)
 }
 
 // 十六进制输入框：输入时自动大写 + 每字节空格。
+//
+// 格式化会重写整串文本（setText），而 setText 天然把光标放到末尾——在中间插入
+// 一个字符，光标就会"跳到最后"，无法连续输入。这里按「非空格字符的个数」把光标
+// 换算到新串，保持它停留在用户原本编辑的那个十六进制位上。
+//
+// 锚点选非空格字符：格式化只会新增/移动分隔空格，不改变十六进制位本身，因此同一
+// 位在格式化前后计数相同（例如 "AB|CD" 光标在 'C' 前 => 计数=2，格式化后仍在第 3
+// 个十六进制位之前）。
 class HexLineEdit : public QLineEdit
 {
 public:
@@ -42,7 +50,30 @@ public:
     {
         connect(this, &QLineEdit::textEdited, this, [this](const QString &t) {
             const QString f = formatHexBytes(t);
-            if (f != t) { setText(f); setCursorPosition(f.size()); }
+            if (f == t)
+                return;
+
+            // 光标前有多少个非空格字符（= 第几位十六进制位），以此为新锚点。
+            const int oldPos = cursorPosition();
+            int digitsBefore = 0;
+            for (int i = 0; i < oldPos && i < t.size(); ++i)
+                if (t.at(i) != QLatin1Char(' '))
+                    ++digitsBefore;
+
+            // 在新串里找回同一锚点。
+            int newPos = 0, seen = 0;
+            for (int i = 0; i < f.size(); ++i) {
+                if (seen == digitsBefore) { newPos = i; break; }
+                if (f.at(i) != QLatin1Char(' '))
+                    ++seen;
+                newPos = i + 1;
+            }
+            if (seen < digitsBefore)
+                newPos = f.size();
+
+            QSignalBlocker blocker(this);   // setText 不再回灌 textEdited
+            setText(f);
+            setCursorPosition(qBound(0, newPos, f.size()));
         });
     }
 };

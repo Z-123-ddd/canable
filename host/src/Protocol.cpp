@@ -29,34 +29,6 @@ int bytesToDlc(int bytes)
 }
 
 // ============================================================================
-//  CRC 引擎（与固件 crc_msb_width 完全一致）
-// ============================================================================
-static uint32_t crcMsbWidth(const uint8_t *p, int n, int width, uint32_t poly)
-{
-    uint32_t crc = 0;
-    const uint32_t top = 1u << (width - 1);
-    const int shift = width - 8;
-    for (int i = 0; i < n; i++) {
-        crc ^= (uint32_t)p[i] << shift;
-        for (int b = 0; b < 8; b++) {
-            if (crc & top) crc = (crc << 1) ^ poly;
-            else           crc <<= 1;
-        }
-    }
-    return crc & ((1u << width) - 1u);
-}
-
-uint32_t crc15(const uint8_t *p, int n) { return crcMsbWidth(p, n, 15, 0x4599u); }
-uint32_t crc17(const uint8_t *p, int n) { return crcMsbWidth(p, n, 17, 0x1685Bu); }
-uint32_t crc21(const uint8_t *p, int n) { return crcMsbWidth(p, n, 21, 0x102899u); }
-
-uint32_t crcForFrame(bool fd, int dataBytes, const uint8_t *p, int n)
-{
-    if (fd)
-        return (dataBytes <= 16) ? crc17(p, n) : crc21(p, n);
-    return crc15(p, n);
-}
-
 // AA AD 警告/报错帧的 CRC：CRC-8, poly 0x07, init 0，覆盖 ASCII 正文（不含 AA AD / DA AA）
 static uint8_t crc8(const uint8_t *p, int n)
 {
@@ -115,24 +87,15 @@ QByteArray buildDataFrame(uint32_t id, bool ext, bool fd, bool brs, bool rtr,
     for (int i = 0; i < nbytes; i++)
         b.append(i < data.size() ? data[i] : char(0));
 
-    // CRC over CTRL+ID+DATA（跳过 2 字节帧头）
-    int cov = b.size() - 2;
-    uint32_t crc = crcForFrame(fd, nbytes, (const uint8_t *)b.constData() + 2, cov);
-    if (fd) {
-        b.append(char((crc >> 16) & 0xFF));
-        b.append(char((crc >> 8) & 0xFF));
-        b.append(char(crc & 0xFF));
-    } else {
-        b.append(char((crc >> 8) & 0xFF));
-        b.append(char(crc & 0xFF));
-    }
+    // 不再附加应用层 CRC：USB bulk 传输本身每包都有 CRC16 + 重传，
+    // 链路是无损的，应用层校验只是每帧白花 2/3 字节。
     return b;
 }
 
 // ============================================================================
 //  字节流解析器
 // ----------------------------------------------------------------------------
-//  AA AB | CTRL | ID(2/4) | DATA | CRC；ID 宽度由 CTRL.IDE 决定。
+//  AA AB | CTRL | ID(2/4) | DATA；ID 宽度由 CTRL.IDE 决定，无应用层 CRC。
 // ============================================================================
 void Parser::reset()
 {
@@ -158,15 +121,8 @@ bool Parser::tryParseBinary(int &outConsumed)
     if (!fd && (ctrl & CTRL_DLC_M) > 8) return false;
     bool rtr = (!fd && (ctrl & CTRL_RTR));
     int dataBytes = rtr ? 0 : dl;
-    int crcBytes = fd ? 3 : 2;
-    int total = 1 + idb + dataBytes + crcBytes;
+    int total = 1 + idb + dataBytes;          // 无应用层 CRC，见 encodeFrame
     if (n < total) return false;
-
-    uint32_t expect = crcForFrame(fd, dataBytes, p, 1 + idb + dataBytes);
-    uint32_t got = 0;
-    for (int i = 0; i < crcBytes; i++)
-        got = (got << 8) | p[1 + idb + dataBytes + i];
-    if (got != expect) return false;
 
     emitFrame(idb, fd, dataBytes);
     m_buf.clear();
@@ -361,15 +317,8 @@ bool decodeDataFrame(const QByteArray &wire, RxFrame *out)
     if (!fd && (ctrl & CTRL_DLC_M) > 8) return false;
     bool rtr = (!fd && (ctrl & CTRL_RTR));
     int dataBytes = rtr ? 0 : dl;
-    int crcBytes = fd ? 3 : 2;
-    int total = H + 1 + idb + dataBytes + crcBytes;
+    int total = H + 1 + idb + dataBytes;      // 无应用层 CRC
     if (n < total) return false;
-    const uint8_t *cov = p + H;
-    uint32_t expect = crcForFrame(fd, dataBytes, cov, 1 + idb + dataBytes);
-    uint32_t got = 0;
-    for (int i = 0; i < crcBytes; i++)
-        got = (got << 8) | p[H + 1 + idb + dataBytes + i];
-    if (got != expect) return false;
     if (out) {
         const uint8_t *id = p + H + 1;
         out->id = (idb == 4)
@@ -411,39 +360,33 @@ bool selfTest(QString *report)
           (uint8_t)c[2] == 1 && (uint8_t)c[3] == 0x20 && (uint8_t)c[4] == 0xA1 &&
           (uint8_t)c[5] == 0x07 && (uint8_t)c[6] == 0x00,
           "命令帧 500000Hz -> AA AA 01 20 A1 07 00");
+    QByteArray ce = buildCommand(CMD_CLEAR_ERRORS, 0);
+    check(ce.size() == 7 && (uint8_t)ce[2] == 12 &&
+          ce == QByteArray::fromHex("AAAA0C00000000"),
+          "清除错误命令 12 -> AA AA 0C 00 00 00 00");
 
-    // 3. 经典帧组帧：AA AB | CTRL | ID | DATA | CRC（CTRL 在前，IDE=0）
+    // 3. 经典帧组帧：AA AB | CTRL | ID | DATA（CTRL 在前，IDE=0，无 CRC）
     QByteArray f = buildDataFrame(0x123, false, false, false, false, 2,
                                   QByteArray::fromHex("DEAD"));
-    uint8_t covC[] = {0x02,0x01,0x23,0xDE,0xAD};   // CTRL|ID|DATA
-    uint32_t crcClassic = crc15(covC, 5);
-    check(f.size() == 9 && (uint8_t)f[2] == 0x02 && (uint8_t)f[3] == 0x01 &&
-          (uint8_t)f[4] == 0x23 && (uint8_t)f[5] == 0xDE && (uint8_t)f[6] == 0xAD &&
-          (uint8_t)f[7] == (uint8_t)(crcClassic >> 8) &&
-          (uint8_t)f[8] == (uint8_t)(crcClassic & 0xFF),
-          "经典帧组帧 -> AA AB CTRL ID DATA CRC (IDE=0)");
+    check(f.size() == 7 && (uint8_t)f[2] == 0x02 && (uint8_t)f[3] == 0x01 &&
+          (uint8_t)f[4] == 0x23 && (uint8_t)f[5] == 0xDE && (uint8_t)f[6] == 0xAD,
+          "经典帧组帧 -> AA AB CTRL ID DATA (IDE=0, 无 CRC)");
 
     // 4. FD<=16
     QByteArray d8; for (int i=1;i<=8;i++) d8.append(char(i));
     QByteArray f17 = buildDataFrame(0x123, false, true, false, false, 8, d8);
-    check(crc17((const uint8_t*)f17.constData()+2, f17.size()-2-3) ==
-              crcForFrame(true, 8, (const uint8_t*)f17.constData()+2, f17.size()-2-3),
-          "CRC-17 自洽");
-    check(f17.size() == 2+1+2+8+3, "FD(8B) 帧长 = 16 字节 (CTRL+ID2)");
+    check(f17.size() == 2+1+2+8, "FD(8B) 帧长 = 13 字节 (CTRL+ID2, 无 CRC)");
 
     // 5. FD>16
     QByteArray d20; for (int i=1;i<=20;i++) d20.append(char(i));
     QByteArray f21 = buildDataFrame(0x123, false, true, false, false, 11, d20);
-    check(f21.size() == 2+1+2+20+3, "FD(20B) 帧长");
-    check(crc21((const uint8_t*)f21.constData()+2, f21.size()-2-3) ==
-              crcForFrame(true, 20, (const uint8_t*)f21.constData()+2, f21.size()-2-3),
-          "CRC-21 自洽");
+    check(f21.size() == 2+1+2+20, "FD(20B) 帧长 = 25 字节 (无 CRC)");
 
     // 5b. 扩展帧 IDE=1，4 字节 ID
     {
         QByteArray fe = buildDataFrame(0x1ABCDEF, true, false, false, false, 0, QByteArray());
         check((uint8_t)fe[2] & CTRL_IDE, "扩展帧 CTRL.IDE=1");
-        check(fe.size() == 2+1+4+0+2, "扩展帧长度 (CTRL+ID4+CRC2)");
+        check(fe.size() == 2+1+4+0, "扩展帧长度 (CTRL+ID4, 无 CRC)");
     }
     // 6. 往返解析：经典帧
     {
@@ -453,7 +396,7 @@ bool selfTest(QString *report)
                     msgs[0].frame.id == 0x123 && !msgs[0].frame.ext &&
                     !msgs[0].frame.fd && msgs[0].frame.dlc == 2 &&
                     msgs[0].frame.data == QByteArray::fromHex("DEAD") && msgs[0].crcOk;
-        check(good, "解析经典帧往返 (id/data/crc)");
+        check(good, "解析经典帧往返 (id/data)");
     }
 
     // 7. 往返解析：扩展 + FD + BRS
@@ -498,14 +441,18 @@ bool selfTest(QString *report)
         check(good, "解析 ASCII 状态行");
     }
 
-    // 11. CRC 错误帧应被丢弃（ID 宽度有歧义，仅在 CRC 校验通过时上报）
+    // 11. AA AB 已无应用层 CRC，改由 CTRL 合法性把关：非法 DLC 的经典帧不得上报
     {
-        QByteArray bad = f; bad[bad.size()-1] = char((uint8_t)bad[bad.size()-1] ^ 0xFF);
+        QByteArray bad;
+        bad.append(char(0xAA)); bad.append(char(0xAB));
+        bad.append(char(0x0A));                 // 经典帧 DLC=10（>8，非法）
+        bad.append(char(0x01)); bad.append(char(0x23));
+        bad.append(QByteArray(10, char(0)));
         Parser ps; ps.feed(bad);
         auto msgs = ps.takeMessages();
         bool anyFrame = false;
         for (auto &mm : msgs) if (mm.type == Message::CanFrame) anyFrame = true;
-        check(!anyFrame, "CRC 错误帧被丢弃（不上报）");
+        check(!anyFrame, "非法 DLC 的帧被丢弃（不上报）");
     }
 
     // 12. AA AD 警告/报错帧（正常 / 坏 CRC / 跨包）

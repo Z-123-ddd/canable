@@ -39,6 +39,7 @@ void workmode_set(uint8_t mode)
 
         /* --- bring up RS485, default = receive (DE low) --- */
         rs485_init(WORKMODE_RS485_BAUD);
+        rs485_irq_set(ENABLE);   /* only now is the USART1 IRQ line safe */
 
         g_work_mode = WORK_MODE_RS485;
     }

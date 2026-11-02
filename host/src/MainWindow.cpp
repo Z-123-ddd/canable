@@ -436,6 +436,12 @@ MainWindow::MainWindow(QWidget *parent)
     rtop->addStretch();
     rv->addLayout(rtop);
 
+    // 接收批量刷新定时器（≈30 Hz）：把固件的高帧率与 UI 开销解耦。
+    m_rxFlushTimer = new QTimer(this);
+    m_rxFlushTimer->setInterval(kRxFlushIntervalMs);
+    connect(m_rxFlushTimer, &QTimer::timeout, this, &MainWindow::flushRxQueue);
+    m_rxFlushTimer->start();
+
     m_rxTable = new QTableWidget(0, RX_COL_COUNT);
     m_rxTable->setObjectName("rxTable");
     m_rxTable->setHorizontalHeaderLabels({
@@ -1554,6 +1560,11 @@ QGroupBox *MainWindow::buildConnGroup()
     auto *updateFw = new QPushButton(QStringLiteral("更新固件"));
     updateFw->setObjectName(QStringLiteral("updateFwBtn"));
     h->addWidget(updateFw);
+    // 清除错误（命令 12）：位于「更新固件」与「关闭（打开）」之间
+    auto *clearErr = new QPushButton(QStringLiteral("清除错误"));
+    clearErr->setObjectName(QStringLiteral("clearErrBtn"));
+    clearErr->setToolTip(QStringLiteral("清除固件内部错误寄存器（命令 12）"));
+    h->addWidget(clearErr);
     h->addStretch();
 
     const int idx = m_connPanels.size();
@@ -1563,6 +1574,7 @@ QGroupBox *MainWindow::buildConnGroup()
         port->setObjectName(QStringLiteral("portBox"));
         m_transportBox = transport; m_portBox = port;
         m_refreshBtn = refresh; m_openBtn = open; m_updateFwBtn = updateFw;
+        m_clearErrBtn = clearErr;
     } else {
         transport->setObjectName(QStringLiteral("transportBox%1").arg(idx));
         port->setObjectName(QStringLiteral("portBox%1").arg(idx));
@@ -1576,6 +1588,7 @@ QGroupBox *MainWindow::buildConnGroup()
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshPorts);
     connect(open,    &QPushButton::clicked, this, &MainWindow::togglePort);
     connect(updateFw, &QPushButton::clicked, this, &MainWindow::onUpdateFirmware);
+    connect(clearErr, &QPushButton::clicked, this, &MainWindow::onClearErrors);
     return box;
 }
 
@@ -2154,6 +2167,15 @@ static QString rxTypeText(const proto::RxFrame &f)
 
 void MainWindow::feedRx(const proto::RxFrame &f)
 {
+    feedRxCounted(f, 1);
+}
+
+/* Same as feedRx() but adds `hits` to the row's counter in one go.
+ *
+ * The batched path uses this so a burst of N frames for one id costs one
+ * setText per column instead of N. */
+void MainWindow::feedRxCounted(const proto::RxFrame &f, quint32 hits)
+{
     int row = m_rxRowById.value(f.id, -1);
     if (row < 0) {
         // 新 id：追加一行
@@ -2167,24 +2189,34 @@ void MainWindow::feedRx(const proto::RxFrame &f)
         m_rxRowById.insert(f.id, row);
     }
 
-    int count = m_rxTable->item(row, RX_COUNT)->text().toInt() + 1;
+    int count = m_rxTable->item(row, RX_COUNT)->text().toInt() + int(hits);
 
     // 就地更新该行（不新增、不滚动）
     const qint64 oldB = rxRowBytes(m_rxTable, row);
     m_rxTable->item(row, RX_ID)->setText(
         QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+    // 记录该帧在主机侧的接收时刻（毫秒），供「导出区」与导出文件使用。
+    // 接收表本身不新增可见列（保持原有布局），时间藏在 item 的 UserRole 里。
+    m_rxTable->item(row, RX_ID)->setData(Qt::UserRole,
+        QDateTime::currentMSecsSinceEpoch());
     m_rxTable->item(row, RX_TYPE)->setText(rxTypeText(f));
     m_rxTable->item(row, RX_LEN)->setText(QString::number(f.data.size()));
     m_rxTable->item(row, RX_DATA)->setText(
         QString::fromLatin1(f.data.toHex(' ').toUpper()));
     m_rxTable->item(row, RX_COUNT)->setText(QString::number(count));
     m_rxBytes[m_rxTable] += rxRowBytes(m_rxTable, row) - oldB;
-    appendScroll(QStringLiteral("RX"), f);            // 收一条
+    appendScroll(QStringLiteral("RX"), f);            // 每个 id 本批次只追一条
     capIndexedRows(m_rxTable, m_rxRowById);           // 最多 100 条，超出丢弃最旧
     applyRxFilter(m_rxTable);                         // 筛选随新行刷新
 }
 
-void MainWindow::simulateRx(const proto::RxFrame &f) { onFrameReceived(f); }
+void MainWindow::simulateRx(const proto::RxFrame &f)
+{
+    /* 自测/脚本调用期望「调用返回后接收区已更新」，而生产路径是入队后由 33 Hz
+     * 定时器批量处理。这里入队后立刻同步排空一次，保持旧语义。 */
+    onFrameReceived(f);
+    flushRxQueue();
+}
 
 int MainWindow::rxRowCount() const
 {
@@ -2274,6 +2306,19 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *ev)
             return true;   // 吞掉空格，避免触发列表内的其它默认行为
         }
     }
+    /* 命令列表的行控件（setItemWidget）会吞掉鼠标事件，导致 QListWidget 收不到
+     * itemDoubleClicked —— 双击编辑因此时而失效（尤其在失焦、滚动到列表下方后）。
+     * 行控件和标签在本类装了 eventFilter 并带 coRow 属性，这里把双击直接转给
+     * 编辑入口。用属性里记录的模型行号，不依赖当前选中项，所以「刚点过别处、
+     * 选中已被清空」的情况也能编辑。 */
+    if (ev->type() == QEvent::MouseButtonDblClick) {
+        const QVariant rowProp = obj->property("coRow");
+        if (rowProp.isValid()) {
+            coEditEntryBytes(rowProp.toInt());
+            return true;
+        }
+    }
+
     // 点击「命令列表」以外的区域：取消选中，并把“更新选中项”恢复为“追加到列表”
     if (ev->type() == QEvent::MouseButtonPress && m_coList && m_coList->isVisible()) {
         auto *me = static_cast<QMouseEvent *>(ev);
@@ -2392,6 +2437,19 @@ void MainWindow::onQueryStatus()
     if (!m_link->isOpen())
         return;
     sendCommand(proto::CMD_GET_STATUS, 0, QStringLiteral("查询状态"));
+}
+
+// 清除固件内部错误寄存器（命令 12）。需连接；成功后把状态栏 TEC/REC 显示清零。
+void MainWindow::onClearErrors()
+{
+    if (!m_link || !m_link->isOpen()) {
+        logWarn(QStringLiteral("未连接，无法清除固件错误。"));
+        return;
+    }
+    sendCommand(proto::CMD_CLEAR_ERRORS, 0, QStringLiteral("清除固件错误"));
+    if (m_errCntLbl)
+        m_errCntLbl->setText(QStringLiteral("TEC:0  REC:0"));
+    logInfo(QStringLiteral("已发送「清除固件错误」命令（命令 12）。"));
 }
 
 // 工作模式切换（模式菜单）：切页面 + 连接时发命令 9
@@ -3414,6 +3472,15 @@ void MainWindow::coRebuildListWidget()
         lbl->setObjectName(QStringLiteral("coListLbl%1").arg(i));
         h->addWidget(lbl, 1);                // 标签占满，按钮紧贴右侧
 
+        /* setItemWidget() 的行控件盖住了 item 本身，鼠标事件被子控件吃掉，
+         * QListWidget 收不到 itemDoubleClicked —— 于是「双击编辑」时而可用
+         * 时而失效（取决于点是落在子控件上还是 item 缝隙里），失焦后再滚动
+         * 到列表下方尤其明显。这里给行控件和标签装过滤器，把双击转发出去。 */
+        w->setProperty("coRow", i);
+        lbl->setProperty("coRow", i);
+        w->installEventFilter(this);
+        lbl->installEventFilter(this);
+
         auto mkBtn = [&](const QString &txt, const QString &on, int delta, bool en) {
             auto *b = new QToolButton;
             b->setText(txt);
@@ -3548,6 +3615,20 @@ void MainWindow::coRestoreFromEntry(int row)
 {
     if (row < 0 || row >= m_coListModel.size()) return;
     const CoListEntry &e = m_coListModel.at(row);
+
+    /* 再次点中「已经在编辑的那一行」时直接返回。
+     *
+     * rebuildCoParams() 会销毁并重建整个参数区布局，而布局重算会把命令列表
+     * 的滚动位置冲回顶部 —— 表现就是「先滚动、点一次、再点一次就跳回顶部」。
+     * 第二次点击时参数区内容与上次完全相同，没有任何需要重建的东西，所以
+     * 直接跳过；同时把滚动位置按记录恢复，作为重建路径的兜底。 */
+    if (row == m_coEditRow) {
+        if (m_coList) coRestoreScrollPos(m_coList->verticalScrollBar()->value());
+        return;
+    }
+
+    const int savedScroll = m_coList ? m_coList->verticalScrollBar()->value() : 0;
+
     if (m_coFuncBox) {
         int r = -1;
         if (e.example >= 0) {
@@ -3595,6 +3676,22 @@ void MainWindow::coRestoreFromEntry(int row)
     m_coEditRow = row;
     if (m_coAddBtn) m_coAddBtn->setText(QStringLiteral("更新选中项"));
     updateCoPreview();
+    coRestoreScrollPos(savedScroll);   // 参数区重建后恢复列表滚动位置
+}
+
+/* 恢复命令列表的垂直滚动位置。
+ *
+ * rebuildCoParams() 触发的布局重算会延后到事件循环，所以这里既立即设一次、
+ * 也排一个 0ms 定时器再设一次，覆盖两种时序。 */
+void MainWindow::coRestoreScrollPos(int pos)
+{
+    if (!m_coList || !m_coList->verticalScrollBar()) return;
+    QScrollBar *sb = m_coList->verticalScrollBar();
+    sb->setValue(pos);
+    QTimer::singleShot(0, this, [this, pos]() {
+        if (!m_coList || !m_coList->verticalScrollBar()) return;
+        m_coList->verticalScrollBar()->setValue(pos);
+    });
 }
 
 void MainWindow::coMoveListRow(int row, int delta)
@@ -3963,7 +4060,16 @@ void MainWindow::coAppendScroll(const QString &dir, const proto::RxFrame &f)
         m_coScrollTable->setItem(row, c, it);
     };
     set(SC_DIR, dirTxt);
-    set(SC_ID,  QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+    auto *idItem = [&]() -> QTableWidgetItem * {
+        auto *it = new QTableWidgetItem(
+            QStringLiteral("0x%1").arg(f.id, f.ext ? 8 : 3, 16, QLatin1Char('0')).toUpper());
+        it->setFlags(Qt::ItemIsEnabled);
+        it->setData(Qt::UserRole, QDateTime::currentMSecsSinceEpoch());
+        return it;
+    }();
+    // 必须是 m_coScrollTable：写成 m_scrollTable 会把本页的帧ID塞进 CAN 页的滚动表，
+    // 本页第 2 列（帧ID）永远是空的，导出时解析不到 ID 就会提示「没有可导出的数据」。
+    m_coScrollTable->setItem(row, SC_ID, idItem);
     set(SC_TYPE, rxTypeText(f));
     set(SC_LEN, QString::number(f.data.size()));
     set(SC_DATA, QString::fromLatin1(f.data.toHex(' ').toUpper()));
@@ -3971,6 +4077,12 @@ void MainWindow::coAppendScroll(const QString &dir, const proto::RxFrame &f)
     capScrollRows(m_coScrollTable);
     applyRxFilter(m_coScrollTable);
     if (follow) m_coScrollTable->scrollToBottom();
+}
+
+QString MainWindow::coScrollCellText(int row, int col) const
+{
+    auto *it = m_coScrollTable ? m_coScrollTable->item(row, col) : nullptr;
+    return it ? it->text() : QString();
 }
 
 void MainWindow::coSetRxMode(bool scroll)
@@ -4038,28 +4150,45 @@ void MainWindow::onUpdateFirmware()
         m_link->close();
     }
 
-    // 2) 轮询检测 DFU 设备（最多约 9 秒），检测到或超时后打开固件更新对话框
+    // 2) 轮询检测 DFU 设备（最多约 9 秒），检测到或超时后打开固件更新对话框。
+    //
+    // 这里刻意不在定时器回调里直接 dlg.exec()：模态对话框会开一个嵌套事件循环，
+    // 定时器无法再触发，主窗口在等待期间表现为"无响应"（点「更新固件」好像卡死）。
+    // 改为：每拍只做一次非阻塞探测，探测到（或超时）就停表并通过单发定时器
+    // 把弹窗排到下一次事件循环，让本轮回调先返回。
     if (!m_dfuPollTimer) {
         m_dfuPollTimer = new QTimer(this);
+        m_dfuPollTimer->setSingleShot(false);
         connect(m_dfuPollTimer, &QTimer::timeout, this, [this]() {
+            // 已经在弹窗里（或刚弹过）就不再探测，避免重入
+            if (m_dfuDialogOpen)
+                return;
+
             dfu::Info info = dfu::findDevice();
-            if (info.found) {
-                m_dfuPollTimer->stop();
+            const bool timeout = (++m_dfuPollCount * 300 >= 9000);
+            if (!info.found && !timeout)
+                return;                       // 继续下一拍
+
+            m_dfuPollTimer->stop();
+            m_dfuDialogOpen = true;
+            if (info.found)
                 logInfo(QStringLiteral("检测到 DFU 设备 %1:%2，总线%3 地址%4")
                             .arg(info.vid, 4, 16, QLatin1Char('0'))
                             .arg(info.pid, 4, 16, QLatin1Char('0'))
                             .arg(info.bus).arg(info.address));
+            else
+                logInfo(QStringLiteral("未检测到 DFU 设备，仍打开固件更新对话框（可手动确认）。"));
+
+            // 排到事件循环末尾：先让本轮回调返回，界面立刻恢复响应
+            QMetaObject::invokeMethod(this, [this, info]() {
                 FirmwareDialog dlg(info, this);
                 dlg.exec();
-            } else if (++m_dfuPollCount * 300 >= 9000) {
-                m_dfuPollTimer->stop();
-                logInfo(QStringLiteral("未检测到 DFU 设备，仍打开固件更新对话框（可手动确认）。"));
-                FirmwareDialog dlg(dfu::Info{}, this);
-                dlg.exec();
-            }
+                m_dfuDialogOpen = false;
+            }, Qt::QueuedConnection);
         });
     }
     m_dfuPollCount = 0;
+    m_dfuDialogOpen = false;
     logInfo(QStringLiteral("正在等待 DFU 设备..."));
     m_dfuPollTimer->start(300);
 }
@@ -4229,15 +4358,67 @@ void MainWindow::setRxMode(bool scroll)
 void MainWindow::onFrameReceived(const proto::RxFrame &f)
 {
     if (m_rxPaused) return;                           // 暂停接收：丢弃（含未完成帧）
-    feedRx(f);                                        // 通用接收表就地更新 + 滚动回显
-    simpleFeedRx(f);                                  // Simple 页接收区同步
-    coFeedRx(f);                                      // CANopen(Open) 页接收区同步
-    cbFeedRx(f);                                      // CyberBeast 页接收区同步
-    // 解析区（4 个协议页，各按本协议解析）
-    appendParse(QStringLiteral("cyberbeast"), f);
-    appendParse(QStringLiteral("simple"), f);
-    appendParse(QStringLiteral("canopen"), f);
-    appendParse(QStringLiteral("rs485"), f);
+
+    /* Only enqueue here.  Doing the real work per frame does not scale: it means
+     * four receive tables, four protocol parsers and a dozen string/setText
+     * calls for every single frame, and the firmware can deliver 8000/s.  The
+     * heavy part runs from flushRxQueue() on a 33 Hz timer instead. */
+    if (m_rxQueue.size() >= kRxQueueCap) {
+        // Bounded: drop the newest and count it, so memory cannot run away and
+        // the loss is observable rather than silent.
+        ++m_rxDroppedByCap;
+        return;
+    }
+    m_rxQueue.append(f);
+}
+
+
+/* Process everything queued since the last tick.
+ *
+ * All four receive tables and protocol parser areas are updated here, once per
+ * timer tick rather than once per frame, which is what keeps the UI responsive
+ * at full bus rate. */
+void MainWindow::stopRxFlushForTest()
+{
+    if (m_rxFlushTimer) m_rxFlushTimer->stop();
+}
+
+void MainWindow::flushRxQueue()
+{
+    if (m_rxQueue.isEmpty())
+        return;
+
+    QVector<proto::RxFrame> batch;
+    batch.swap(m_rxQueue);                 // 取出快照，处理期间新帧继续入队
+
+    /* Collapse the batch per CAN id before touching any widget.
+     *
+     * The receive table is "in place": one row per id showing the latest frame
+     * and a hit count.  So for a batch we only need the LAST frame of each id
+     * plus how many times it arrived - writing every frame of the batch would
+     * repaint the same row hundreds of times per tick for no visible gain.
+     * This is what makes 8k frames/s survivable: widget work scales with the
+     * number of distinct ids, not the number of frames. */
+    struct Agg { proto::RxFrame last; quint32 hits = 0; };
+    QHash<quint32, Agg> agg;
+    agg.reserve(batch.size() < 64 ? batch.size() : 64);
+    for (const proto::RxFrame &f : batch) {
+        Agg &a = agg[f.id];
+        a.last = f;
+        ++a.hits;
+    }
+
+    for (auto it = agg.constBegin(); it != agg.constEnd(); ++it) {
+        const proto::RxFrame &f = it.value().last;
+        feedRxCounted(f, it.value().hits);   // 就地更新一行，次数一次加到位
+        simpleFeedRx(f);
+        coFeedRx(f);
+        cbFeedRx(f);
+        appendParse(QStringLiteral("cyberbeast"), f);
+        appendParse(QStringLiteral("simple"), f);
+        appendParse(QStringLiteral("canopen"), f);
+        appendParse(QStringLiteral("rs485"), f);
+    }
 }
 
 void MainWindow::onResponseReceived(const proto::RxResponse &r)
@@ -4432,6 +4613,9 @@ QVector<ClipRecord> MainWindow::rxTableRecords(QTableWidget *t) const
         ClipRecord rec;
         rec.id = id;
         rec.data = data;
+        // 接收时刻存在 ID 列的 UserRole 里；没有则保持 0（导出时留空）
+        if (auto *idItem2 = t->item(r, cId))
+            rec.tsMs = idItem2->data(Qt::UserRole).toLongLong();
         if (cType >= 0) {
             const QString ty = t->item(r, cType) ? t->item(r, cType)->text() : QString();
             rec.extended = ty.contains(QStringLiteral("扩展"));

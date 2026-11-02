@@ -315,8 +315,15 @@ static Probe probeDevice(libusb_device *dev, bool needVidPid)
     return p;
 }
 
+QMutex &libusbGuard()
+{
+    static QMutex m;
+    return m;
+}
+
 Info findDevice()
 {
+    QMutexLocker lock(&libusbGuard());
     Info info;
     libusb_context *ctx = nullptr;
     if (libusb_init(&ctx) != 0)

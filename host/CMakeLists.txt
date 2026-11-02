@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(canable2_host VERSION 30.0.7 LANGUAGES C CXX)
+project(canable2_host VERSION 30.0.9 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -102,7 +102,7 @@ target_include_directories(canable2_host PRIVATE src ${LIBUSB_INCLUDE_DIR})
 # 内置「当前固件最新版本号」：上位机不随固件改动，仅用于在「关于」里比对 USB 上报的固件版本
 target_compile_definitions(canable2_host PRIVATE
     APP_VERSION="${PROJECT_VERSION}"
-    FW_VERSION="30.0.5")
+    FW_VERSION="30.0.7")
 
 target_link_libraries(canable2_host PRIVATE
     Qt6::Widgets

@@ -70,6 +70,18 @@ void error_clear(error_t err)
 }
 
 
+// Clear the whole error register and discard any queued AA AD reports.
+void error_clear_all(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    error_register = 0;
+    for (uint8_t i = 0; i < ERR_MAX; i++)
+        err_report_count[i] = 0;
+    __set_PRIMASK(primask);
+}
+
+
 // Pop one pending error report; returns -1 when none remain.
 int error_take_pending(void)
 {

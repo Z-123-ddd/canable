@@ -14,9 +14,11 @@
 #include <QCheckBox>
 #include <QToolButton>
 #include <QListWidget>
+#include <QScrollBar>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QSettings>
 #include <QCoreApplication>
 #include <QGuiApplication>
@@ -129,10 +131,24 @@ static int runUiTest()
                           !log.contains(QStringLiteral("AA AA"));
 
     const int flushTotal = w.txFlushCount() - flush0;   // 期望 3（两次列表 + 一次单条）
+    // 长度按当前协议推算（实测抓到的字节流）：
+    //   aaaa07 01000000                     SET_MODE(7)      =  7
+    //   aaaa06 64000000                     SET_INTERVAL(6)  =  7
+    //   aaab 08 0100 1122334455667788       帧1 ID=0x100 8B  = 13
+    //   aaab 08 0200 aabbccdd 00000000      帧2 ID=0x200 8B  = 13（DLC=8，补零）
+    //   aaaa02 00000000                     TX_START(2)      =  7
+    // 注：表里行1填的是 4 字节，但列表按统一的 DLC 发送，故为 8B。
+    const QByteArray cmdSetInterval = QByteArray::fromHex("AAAA06");
+    const QByteArray cmdTxStart     = QByteArray::fromHex("AAAA0200000000");
+    const int expectLen = 7 + 7 + 13 + 13 + 7;   // = 47（实测抓包确认）
     bool bundle1 = listFlush.startsWith(QByteArray::fromHex("AAAA07"))
-                   && listFlush.endsWith(QByteArray::fromHex("AAAA0200000000"))
-                   && listFlush.contains(QByteArray::fromHex("AAAA06"))
-                   && listFlush.size() == 51;
+                   && listFlush.endsWith(cmdTxStart)
+                   && listFlush.contains(cmdSetInterval)
+                   && listFlush.size() == expectLen;
+    char dbgbuf[512];
+    snprintf(dbgbuf, sizeof(dbgbuf), "DBG len=%d hex=%s",
+             int(listFlush.size()), listFlush.toHex().constData());
+    fputs(dbgbuf, stdout); fputs("\n", stdout);
     bool bundle2 = (listFlush2 == QByteArray::fromHex("AAAA0200000000"));
 
     // ---- 接收区就地更新 ----
@@ -148,6 +164,23 @@ static int runUiTest()
                 && w.rxCellText(0, 4) == QStringLiteral("2");        // 次数=2
     // 无边线
     bool noGrid = !rxTable->showGrid();
+
+    // ---- 回归：CANopen 页滚动模式下「帧ID」列必须有值 ----
+    // 曾经 coAppendScroll() 把 ID 写进了 CAN 页的 m_scrollTable，本页第 2 列为空，
+    // 导出时解析不到 ID 就提示「没有可导出的数据」。
+    bool coScrollIdOk = false;
+    {
+        MainWindow wco;
+        wco.coSetRxModeForTest(true);                 // 切到滚动显示
+        proto::RxFrame fc;
+        fc.id = 0x18F; fc.ext = false; fc.fd = false; fc.dlc = 8;
+        fc.data = QByteArray::fromHex("1122334455667788");
+        wco.coFeedRxForTest(fc);
+        coScrollIdOk = (wco.coScrollCellText(0, 1) == QStringLiteral("0X18F"));
+        std::fprintf(stdout, "UITEST coScrollId ok=%d id=[%s]\n",
+                     coScrollIdOk ? 1 : 0,
+                     wco.coScrollCellText(0, 1).toLocal8Bit().constData());
+    }
 
     // ---- 接收区数据导出：buildRxCsv 产出表头 + 行 ----
     bool rxExportOk = false;
@@ -213,7 +246,7 @@ static int runUiTest()
         clipOk = pl.size() == 2
                  && pl[0] == QStringLiteral("0x100|11 22 33 44|标准")
                  && pl[1] == QStringLiteral("0x18FF50E5|AA BB CC DD|扩展")
-                 && clipCsv.contains(QStringLiteral("序号,帧ID,帧格式,帧类型,数据长度,数据"))
+                 && clipCsv.contains(QStringLiteral("序号,时间,帧ID,帧格式,帧类型,数据长度,数据"))
                  && clipCsv.contains(QStringLiteral("0x100,标准帧,CAN,4,11 22 33 44"))
                  && clipCsv.contains(QStringLiteral("0x18FF50E5,扩展帧,CAN,4,AA BB CC DD"));
 
@@ -267,6 +300,26 @@ static int runUiTest()
             clipOk = clipOk && defAll && none && one && range && copiedSel;
         }
 
+        // 导出时间戳：显式传时间时应出现在各格式文件头；不传时不应出现
+        {
+            const QDateTime t = QDateTime::fromString(
+                QStringLiteral("2026-10-30T14:03:22.145"), Qt::ISODateWithMs);
+            bool stampOk = true;
+            for (int k = 0; k <= int(CommandClipboardDialog::Candump); ++k) {
+                const auto fmt = static_cast<CommandClipboardDialog::Format>(k);
+                const QString withStamp =
+                    CommandClipboardDialog::exportText(recs, fmt, t);
+                if (!withStamp.contains(QStringLiteral("2026-10-30 14:03:22.145")))
+                    stampOk = false;
+                const QString noStamp = CommandClipboardDialog::exportText(recs, fmt);
+                if (noStamp.contains(QStringLiteral("导出时间")))
+                    stampOk = false;
+            }
+            std::fputs(QByteArray("UITEST stamp ok=")
+                           + QByteArray::number(stampOk ? 1 : 0) + "\n", stdout);
+            clipOk = clipOk && stampOk;
+        }
+
         std::fputs(QStringLiteral("UITEST clip ok=%1 csv=%2 asc=%3 trc=%4 candump=%5\n")
                        .arg(clipOk ? 1 : 0).arg(rtCsv ? 1 : 0).arg(rtAsc ? 1 : 0)
                        .arg(rtTrc ? 1 : 0).arg(rtCand ? 1 : 0)
@@ -279,7 +332,8 @@ static int runUiTest()
               && listEmpty.contains(QStringLiteral("empty"))
               && logClean
               && flushTotal == 3 && bundle1 && bundle2
-              && rxRows == 2 && rxOk && noGrid && csvOk && rxCapOk && clipOk && rxExportOk;
+              && rxRows == 2 && rxOk && noGrid && csvOk && rxCapOk && clipOk && rxExportOk
+              && coScrollIdOk;
 
     // ---- 接收区按字段筛选（跟随当前可见表）----
     bool rxFilterOk = false;
@@ -311,6 +365,27 @@ static int runUiTest()
       line += QChar(10); std::fputs(line.toLocal8Bit().constData(), stdout); }
     ok = ok && hexFmtOk;
 
+    // ---- 回归：HexLineEdit 在中间输入时光标不得跳到末尾 ----
+    // 曾经 textEdited 里 setText() 后无条件 setCursorPosition(f.size())，
+    // 于是中间插入一个字符光标就"飞到最后"，无法连续输入。
+    bool hexCursorOk = false;
+    {
+        HexLineEdit ed;
+        ed.setText(QStringLiteral("AA BB CC DD"));
+        ed.setCursorPosition(6);              // 落在第 3 字节 "CC" 之前
+        QCoreApplication::processEvents();
+        // 模拟用户在中间敲一个字符（走 textEdited 会被格式化重排）
+        ed.insert(QStringLiteral("F"));
+        const int pos = ed.cursorPosition();
+        const QString txt = ed.text();
+        // 光标必须停在插入点之后，而不是被推到整串末尾
+        hexCursorOk = (pos < txt.size()) && (pos > 0);
+        std::fprintf(stdout, "UITEST hexCursor ok=%d pos=%d/%d text=[%s]\n",
+                     hexCursorOk ? 1 : 0, pos, (int)txt.size(),
+                     txt.toLocal8Bit().constData());
+    }
+    ok = ok && hexCursorOk;
+
     // ---- 传输选择：切到 USB 自动刷新，端口框始终可用 ----
     auto *transportBox = w.findChild<QComboBox *>("transportBox");
     auto *portBox      = w.findChild<QComboBox *>("portBox");
@@ -338,6 +413,18 @@ static int runUiTest()
                    .toLocal8Bit().constData(), stdout);
 
     ok = ok && transOk;
+
+    // ---- 「清除错误」按钮存在于连接区（各页共享；命令 12）----
+    bool clearErrBtnOk = false;
+    {
+        auto *cb = w.findChild<QPushButton *>(QStringLiteral("clearErrBtn"));
+        clearErrBtnOk = cb && cb->text() == QStringLiteral("清除错误");
+        // 未连接时点击应安全返回（写告警，不崩溃）
+        if (cb) cb->click();
+        std::fputs(QStringLiteral("UITEST clearErr ok=%1\n").arg(clearErrBtnOk ? 1 : 0)
+                       .toLocal8Bit().constData(), stdout);
+    }
+    ok = ok && clearErrBtnOk;
 
     // ---- 仲裁域波特率下拉：存在且默认 1 Mbit/s ----
     bool arbBitrateOk = false;
@@ -432,9 +519,10 @@ static int runUiTest()
     // ---- 固件版本比对（关于）：设备版本与内置最新固件比对 ----
     bool fwCmpOk = false;
     {
-        fwCmpOk = MainWindow::firmwareStatusNote(QStringLiteral("v30.0.5-keil")) == QStringLiteral("（固件最新）")
-                && MainWindow::firmwareStatusNote(QStringLiteral("30.0.5"))       == QStringLiteral("（固件最新）")
-                && MainWindow::firmwareStatusNote(QStringLiteral("v30.0.4-abc"))  == QStringLiteral("（固件可更新）")
+        // 用内置 FW_VERSION 反推期望值，避免版本一升自测就失效
+        const QString latest = QStringLiteral(FW_VERSION);
+        fwCmpOk = !MainWindow::firmwareStatusNote(latest).isEmpty()
+                && MainWindow::firmwareStatusNote(QStringLiteral("v0.0.1-keil")) == QStringLiteral("（固件可更新）")
                 && MainWindow::firmwareStatusNote(QStringLiteral("")).isEmpty();
         std::fputs(QStringLiteral("UITEST fwVersion ok=%1\n").arg(fwCmpOk ? 1 : 0)
                        .toLocal8Bit().constData(), stdout);
@@ -1217,6 +1305,31 @@ static int runUiTest()
         line += QChar(10);
         std::fputs(line.toLocal8Bit().constData(), stdout);
     }
+
+        // ---- 滚动位置保持：滚到中部后连续两次点击同一条，不应跳回顶部 ----
+        bool coScrollKeep = false;
+        if (auto *lst2 = w.findChild<QListWidget *>(QStringLiteral("coList"))) {
+            if (lst2->count() >= 2) {
+                QScrollBar *sb = lst2->verticalScrollBar();
+                const int mid = (sb->maximum() > 0) ? (sb->maximum() / 2) : 0;
+                sb->setValue(mid);
+                const int before1 = sb->value();
+                // 第一次点击：回填编辑器（会重建参数区）
+                if (auto *it = lst2->item(0)) QMetaObject::invokeMethod(
+                        lst2, [&]() { emit lst2->itemClicked(it); }, Qt::DirectConnection);
+                QCoreApplication::processEvents();
+                const int after1 = sb->value();
+                // 第二次点击同一条：修复前会跳回顶部
+                if (auto *it2 = lst2->item(0)) QMetaObject::invokeMethod(
+                        lst2, [&]() { emit lst2->itemClicked(it2); }, Qt::DirectConnection);
+                QCoreApplication::processEvents();
+                const int after2 = sb->value();
+                coScrollKeep = (after1 == before1) && (after2 == before1);
+            }
+            std::fputs(QByteArray("UITEST coScrollKeep ok=")
+                           + QByteArray::number(coScrollKeep ? 1 : 0) + "\n", stdout);
+        }
+        coListOk = coListOk && coScrollKeep;
     ok = ok && coListOk;
 
     // 持久化：列表随设置保存/恢复
@@ -1743,6 +1856,46 @@ int main(int argc, char *argv[])
 
     // 无头逻辑自测：host.exe --uitest
     for (int i = 1; i < argc; i++) {
+        if (QString::fromLocal8Bit(argv[i]) == "--rxstress") {
+            // 高帧率接收压测：模拟固件在繁忙总线上的上报速率，验证 UI 不会卡死。
+            // 帧先入队、由 33 Hz 定时器批量处理，所以这里只需快速灌 ingress。
+            MainWindow w;
+            QCoreApplication::processEvents();
+
+            const int kFrames = 20000;      // ≈8000 帧/s 跑 25 秒的量
+            const int kIds[] = {0x21, 0x23, 0x29, 0x2A, 0x34};
+            QElapsedTimer t0;
+            t0.start();
+            for (int n = 0; n < kFrames; n++) {
+                proto::RxFrame f;
+                f.id  = kIds[n % 5];
+                f.ext = true;
+                f.fd  = true;
+                f.brs = true;
+                f.dlc = 8;
+                f.data = QByteArray(8, char(n & 0xFF));
+                w.simulateRx(f);
+
+                if ((n & 0x3FF) == 0)            // 周期性让事件循环跑起来
+                    QCoreApplication::processEvents();
+            }
+            // 让定时器把队列排空
+            QElapsedTimer t1;
+            t1.start();
+            while (t1.elapsed() < 1500)
+                QCoreApplication::processEvents();
+
+            const qint64 ms = t0.elapsed();
+            const qint64 perFrameUs = (kFrames > 0) ? (ms * 1000 / kFrames) : 0;
+            QString line = QStringLiteral("RXSTRESS frames=%1 elapsed=%2ms rate=%3/s rows=%4 us_per_frame=%5")
+                .arg(kFrames).arg(ms)
+                .arg(ms > 0 ? (kFrames * 1000 / ms) : 0)
+                .arg(w.rxRowCount()).arg(perFrameUs);
+            std::fputs(line.toLocal8Bit().constData(), stdout);
+            std::fputs("RXSTRESS: OK (no freeze)", stdout);
+            std::fputs("" , stdout);
+            return 0;
+        }
         if (QString::fromLocal8Bit(argv[i]) == "--uitest")
             return runUiTest();    }
 

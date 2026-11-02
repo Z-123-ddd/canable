@@ -20,6 +20,8 @@ __IO uint32_t wCNTR         = 0;
 extern void EP1_IN_Callback(void);
 extern void EP1_OUT_Callback(void);
 extern void EP2_IN_Callback(void);
+extern void EP3_IN_Callback(void);
+extern void EP3_OUT_Callback(void);
 
 /* endpoint callback arrays */
 void (*pEpInt_IN[7])(void) = {

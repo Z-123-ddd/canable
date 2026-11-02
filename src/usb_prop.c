@@ -1,6 +1,6 @@
 /**
  * @file    usb_prop.c
- * @brief   USB Device Property callbacks for CANable2-N32 (CDC ACM)
+ * @brief   USB Device Property callbacks for CANable2-N32 (vendor class)
  *
  * Based on ODrive usb_prop.c.  Provides Device_Property and
  * User_Standard_Requests structures required by the N32 USB library.
@@ -11,17 +11,10 @@
 #include "usb_prop.h"
 #include "usb_desc.h"
 #include "usb_pwr.h"
+#include "usbd_cdc_if.h"
 
 /* Private variables */
 static uint8_t Request = 0;
-
-LINE_CODING linecoding =
-{
-    7372800, /* baud rate */
-    0x00,   /* stop bits: 1 */
-    0x00,   /* parity: none */
-    0x08    /* data bits: 8 */
-};
 
 /* -------------------------------------------------------------------------- */
 /* Device descriptor wrapper structures                                       */
@@ -46,6 +39,20 @@ USB_OneDescriptor String_Descriptor[4] =
     {(uint8_t*)Virtual_Com_Port_StringProduct,  VIRTUAL_COM_PORT_SIZ_STRING_PRODUCT},
     {(uint8_t*)Virtual_Com_Port_StringSerial,   VIRTUAL_COM_PORT_SIZ_STRING_SERIAL},
 };
+/* MS OS 2.0 string descriptor, published as index 0xEE so Windows can learn the
+ * vendor request code it must use to fetch the WCID descriptor set. */
+static USB_OneDescriptor Msos_String_Descriptor =
+{
+    (uint8_t*)Virtual_Com_Port_StringMSOS,
+    VIRTUAL_COM_PORT_SIZ_STRING_MSOS
+};
+
+static USB_OneDescriptor Msos_Set_Descriptor =
+{
+    (uint8_t*)Virtual_Com_Port_MSOS20DescriptorSet,
+    VIRTUAL_COM_PORT_SIZ_MSOS20
+};
+
 
 /* -------------------------------------------------------------------------- */
 /* Core structures required by N32 USB library                                */
@@ -110,6 +117,10 @@ void Virtual_Com_Port_Reset(void)
 
     USB_SetBuftab(BTABLE_ADDRESS);
 
+    /* The host just reset the bus: endpoints lost whatever was armed, so the
+     * software TX pipeline must drop its bookkeeping too. */
+    cdc_tx_reset();
+
     /* Initialize Endpoint 0 */
     USB_SetEpType(ENDP0, EP_CONTROL);
     SetEPTxStatus(ENDP0, EP_TX_STALL);
@@ -119,25 +130,31 @@ void Virtual_Com_Port_Reset(void)
     USB_SetEpRxCnt(ENDP0, Device_Property.MaxPacketSize);
     USB_SetEpRxValid(ENDP0);
 
-    /* Initialize Endpoint 1 IN (Bulk — CDC data device->host)
-     * Set to NAK initially — only arm when cdc_process() has data to send.
-     * Setting EP_TX_VALID here would cause 64 bytes of garbage from the
-     * uninitialized PMA buffer to be sent on the first host IN token. */
-    USB_SetEpType(ENDP1, EP_BULK);
-    USB_SetEpTxAddr(ENDP1, ENDP1_TXADDR);
-    SetEPTxStatus(ENDP1, EP_TX_NAK);
-
-    /* Initialize Endpoint 1 OUT (Bulk — CDC data host->device) */
+    /* Initialize Endpoint 1 OUT (bulk, host -> device) */
     USB_SetEpType(ENDP1, EP_BULK);
     USB_SetEpRxAddr(ENDP1, ENDP1_RXADDR);
     USB_SetEpRxCnt(ENDP1, Device_Property.MaxPacketSize);
     SetEPRxStatus(ENDP1, EP_RX_VALID);
 
-    /* Initialize Endpoint 2 (Interrupt IN — CDC notification) */
-    USB_SetEpType(ENDP2, EP_INTERRUPT);
-    USB_SetEpTxAddr(ENDP2, ENDP2_TXADDR);
-    SetEPRxStatus(ENDP2, EP_RX_DIS);
-    SetEPTxStatus(ENDP2, EP_TX_NAK);
+    /* Initialize the uplink IN endpoint.  TX status stays NAK until the
+     * pipeline has a packet queued (cdc_tx_arm()); arming it here would make
+     * the core send uninitialised PMA on the first IN token. */
+#if CDC_TX_USE_DBUF
+    /* Experimental double-buffered uplink: EP3 IN owns both PMA buffers, so it
+     * cannot carry OUT data (see usb_conf.h). */
+    USB_SetEpType(ENDP3, EP_BULK);
+    USB_SetEpDoubleBufer(ENDP3);
+    USB_SetEpDblBuferAddr(ENDP3, ENDP3_TXBUF0_ADDR, ENDP3_TXBUF1_ADDR);
+    USB_SetEpDblBuferCnt(ENDP3, EP_DBUF_IN, Device_Property.MaxPacketSize);
+    SetEPRxStatus(ENDP3, EP_RX_NAK);
+    SetEPTxStatus(ENDP3, EP_TX_NAK);
+#else
+    /* Default: single-buffered EP1 IN, EP1 OUT keeps the downlink. */
+    USB_SetEpType(ENDP1, EP_BULK);
+    USB_SetEpTxAddr(ENDP1, ENDP1_TXADDR);
+    USB_SetEpTxCnt(ENDP1, Device_Property.MaxPacketSize);
+    SetEPTxStatus(ENDP1, EP_TX_NAK);
+#endif
 
     USB_SetDeviceAddress(0);
     bDeviceState = ATTACHED;
@@ -150,6 +167,10 @@ void Virtual_Com_Port_SetConfiguration(void)
         bDeviceState = CONFIGURED;
         USB_ClrDattogTx(ENDP1);
         USB_ClrDattogRx(ENDP1);
+#if CDC_TX_USE_DBUF
+        USB_ClrDattogTx(ENDP3);
+        USB_ClrDattogRx(ENDP3);
+#endif
     }
 }
 
@@ -168,38 +189,32 @@ void Virtual_Com_Port_Status_Out(void)
 {
 }
 
-USB_Result Virtual_Com_Port_Data_Setup(uint8_t RequestNo)
+uint8_t *Virtual_Com_Port_GetMSOS20Set(uint16_t Length)
 {
-    uint8_t *(*CopyRoutine)(uint16_t) = NULL;
-
-    if (RequestNo == GET_LINE_CODING)
-    {
-        if (Type_Recipient == (CLASS_REQUEST | INTERFACE_RECIPIENT))
-            CopyRoutine = Virtual_Com_Port_GetLineCoding;
-    }
-    else if (RequestNo == SET_LINE_CODING)
-    {
-        if (Type_Recipient == (CLASS_REQUEST | INTERFACE_RECIPIENT))
-            CopyRoutine = Virtual_Com_Port_SetLineCoding;
-        Request = SET_LINE_CODING;
-    }
-
-    if (CopyRoutine == NULL)
-        return UnSupport;
-
-    pInformation->Ctrl_Info.CopyData = CopyRoutine;
-    pInformation->Ctrl_Info.Usb_wOffset = 0;
-    (*CopyRoutine)(0);
-    return Success;
+    return Standard_GetDescriptorData(Length, &Msos_Set_Descriptor);
 }
 
+/* IN data stage.  The only thing we serve here is the MS OS 2.0 descriptor set
+ * that makes Windows bind WinUSB without an INF file. */
+USB_Result Virtual_Com_Port_Data_Setup(uint8_t RequestNo)
+{
+    if (Type_Recipient == (VENDOR_REQUEST | DEVICE_RECIPIENT) &&
+        RequestNo == USB_MSOS_VENDOR_CODE &&
+        pInformation->USBwIndex0 == USB_MSOS_DESCRIPTOR_INDEX)
+    {
+        pInformation->Ctrl_Info.CopyData    = Virtual_Com_Port_GetMSOS20Set;
+        pInformation->Ctrl_Info.Usb_wOffset = 0;
+        Virtual_Com_Port_GetMSOS20Set(0);
+        return Success;
+    }
+    return UnSupport;
+}
+
+/* No-data stage: nothing to accept in a vendor-class build (the CDC line-coding
+ * and control-line requests are gone with the class). */
 USB_Result Virtual_Com_Port_NoData_Setup(uint8_t RequestNo)
 {
-    if (Type_Recipient == (CLASS_REQUEST | INTERFACE_RECIPIENT))
-    {
-        if (RequestNo == SET_COMM_FEATURE || RequestNo == SET_CONTROL_LINE_STATE)
-            return Success;
-    }
+    (void)RequestNo;
     return UnSupport;
 }
 
@@ -216,6 +231,10 @@ uint8_t *Virtual_Com_Port_GetConfigDescriptor(uint16_t Length)
 uint8_t *Virtual_Com_Port_GetStringDescriptor(uint16_t Length)
 {
     uint8_t wValue0 = pInformation->USBwValue0;
+
+    if (wValue0 == USB_MSOS_STRING_INDEX)
+        return Standard_GetDescriptorData(Length, &Msos_String_Descriptor);
+
     if (wValue0 > 4)
         return NULL;
     return Standard_GetDescriptorData(Length, &String_Descriptor[wValue0]);
@@ -226,26 +245,6 @@ USB_Result Virtual_Com_Port_Get_Interface_Setting(uint8_t Interface, uint8_t Alt
     if (AlternateSetting > 0)
         return UnSupport;
     return Success;
-}
-
-uint8_t *Virtual_Com_Port_GetLineCoding(uint16_t Length)
-{
-    if (Length == 0)
-    {
-        pInformation->Ctrl_Info.Usb_wLength = sizeof(linecoding);
-        return NULL;
-    }
-    return (uint8_t *)&linecoding;
-}
-
-uint8_t *Virtual_Com_Port_SetLineCoding(uint16_t Length)
-{
-    if (Length == 0)
-    {
-        pInformation->Ctrl_Info.Usb_wLength = sizeof(linecoding);
-        return NULL;
-    }
-    return (uint8_t *)&linecoding;
 }
 
 /* Standard request stubs */

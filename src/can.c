@@ -23,6 +23,7 @@
 #include "can_frame_list.h"
 #include "led.h"
 #include "error.h"
+#include "usbd_cdc_if.h"
 #include "system.h"
 
 
@@ -212,10 +213,13 @@ void can_init(void)
     // Build FDCAN init structure (no InitStruct function in N32 HAL — zero it out)
     memset(&can_handle, 0, sizeof(can_handle));
 
-    // Default to 1M nominal arbitration, 5M FD data (CAN FD max rate)
+    // Default to 1M nominal arbitration, 5M FD data (used when FD frames arrive)
     can_set_bitrate(CAN_BITRATE_1000K);
     can_set_data_bitrate(CAN_DATA_BITRATE_5M);  // FD data segment default: 5M (CAN FD max)
 
+    // CAN FD by default (FD + bit-rate switch). The host tells FD vs classic
+    // apart per-frame from the received CTRL.FDF bit; the controller does not
+    // need to change format.
     can_handle.FrameFormat = FDCAN_FRAME_FD_BRS;
 #ifdef CAN_LOOPBACK_TEST
     can_handle.Mode = FDCAN_MODE_INTERNAL_LOOPBACK;  // 自收发测试
@@ -569,6 +573,7 @@ int32_t can_apply_data_bitrate_hz(uint32_t hz)
 }
 
 
+
 // ---- Auto bitrate scan implementation ----
 
 // enum rate -> Hz
@@ -858,6 +863,14 @@ void can_tx_stop(void)
 }
 
 // Drop every frame already sitting in the hardware RX FIFO0 (read & discard).
+/* Discard everything sitting in the hardware RX FIFO.
+ *
+ * Deliberately uses FDCAN_GetRxMsg instead of a single RXF0A acknowledge: the
+ * acknowledge index only releases up to the current Get Index, so one write
+ * frees one element and a wrapped FIFO needs a write per element.  Verified on
+ * hardware that the single-write version left RF0S.F0FL pinned at full, which
+ * silently dropped frames at the controller (RF0L).  The per-frame copy here
+ * costs a little in the drop path but keeps the FIFO genuinely empty. */
 static void can_rx_hw_flush(void)
 {
     FDCAN_RxHeaderType th;
@@ -944,7 +957,14 @@ void can_rx_isr(void)
             // Software ring full -> drop the oldest frame by advancing tail,
             // then store the new frame over the freed slot.
             rxqueue.tail = (uint16_t)((rxqueue.tail + 1) % RXQUEUE_LEN);
-            error_raise(ERR_CANRXFIFO_OVERFLOW);
+            /* Report the overflow only when the frames were meant to reach a
+             * host.  If nobody can take them - USB not enumerated yet, or the
+             * uplink backed up because the host stopped reading - dropping is
+             * the correct behaviour, and a sticky ERR_CANRXFIFO_OVERFLOW would
+             * only make the host chase a condition it cannot fix.  Decided here
+             * at the moment of the drop, so healthy traffic never trips it. */
+            if (usb_host_available() && !usb_tx_saturated())
+                error_raise(ERR_CANRXFIFO_OVERFLOW);
         }
 
         if (FDCAN_GetRxMsg(FDCAN1, FDCAN_RX_FIFO0,

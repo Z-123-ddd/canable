@@ -22,6 +22,7 @@
 #ifndef DFU_DEVICE_H
 #define DFU_DEVICE_H
 
+#include <QMutex>
 #include <QString>
 #include <QList>
 #include <functional>
@@ -31,6 +32,15 @@ namespace dfu {
 
 // N32 出厂 DFU bootloader 的 VID/PID（**本板实测**：设备名为 "Nationstech DFU"）。
 // 注意：不是 ST 的 0x0483:0xDF11 —— N32 用它自己的 0x19F5:0x4537。
+// 进程内所有 libusb 入口（UsbLink 的收发/关闭、DFU 探测）都必须持有的锁。
+//
+// libusb 的上下文/事件处理不是线程安全的：一边有异步 URB 在泵事件，另一边
+// 又对同一份全局状态做 init/exit，会在 libusb-1.0.dll 内部触发访问违例
+// （0xc0000005）。点「更新固件」时设备进 DFU、连接被关闭，紧接着每秒三次
+// 的 DFU 探测正好与接收线程的重叠 —— 这就是闪退的根因。
+// 定义在 dfu_device.cpp，UsbLink 与 DFU 探测共用同一把。
+QMutex &libusbGuard();
+
 constexpr uint16_t kDfuVid = 0x19F5;
 constexpr uint16_t kDfuPid = 0x4537;
 

@@ -1,6 +1,6 @@
 /**
  * @file    usb_desc.h
- * @brief   USB Descriptor definitions for CANable2-N32 (CDC ACM)
+ * @brief   USB Descriptor definitions for CANable2-N32 (vendor specific class)
  */
 
 #ifndef __USB_DESC_H
@@ -13,13 +13,21 @@
 #define USB_INTERFACE_DESCRIPTOR_TYPE           0x04
 #define USB_ENDPOINT_DESCRIPTOR_TYPE            0x05
 
-/* CDC data sizes */
+/* Bulk endpoint size */
 #define VIRTUAL_COM_PORT_DATA_SIZE              64
-#define VIRTUAL_COM_PORT_INT_SIZE               8
 
 /* Descriptor sizes */
 #define VIRTUAL_COM_PORT_SIZ_DEVICE_DESC        18
-#define VIRTUAL_COM_PORT_SIZ_CONFIG_DESC        67
+#define VIRTUAL_COM_PORT_SIZ_CONFIG_DESC        32   /* cfg + iface + 2 bulk EPs */
+
+/* ---- MS OS 2.0 (WCID) ----
+ * Windows probes string descriptor 0xEE, receives "MSFT100" + this vendor code,
+ * then issues that vendor request with wIndex = 7 to fetch the descriptor set. */
+#define USB_MSOS_VENDOR_CODE                    0x01
+#define USB_MSOS_STRING_INDEX                   0xEE
+#define USB_MSOS_DESCRIPTOR_INDEX               0x07
+#define VIRTUAL_COM_PORT_SIZ_STRING_MSOS        18
+#define VIRTUAL_COM_PORT_SIZ_MSOS20             42
 #define VIRTUAL_COM_PORT_SIZ_STRING_LANGID      4
 #define VIRTUAL_COM_PORT_SIZ_STRING_VENDOR      22    /* "CyberBeast" = 10 chars * 2 + 2 */
 #define VIRTUAL_COM_PORT_SIZ_STRING_PRODUCT     38    /* "CyberBeast USB2CAN" = 18 chars * 2 + 2 */
@@ -31,5 +39,7 @@ extern const uint8_t Virtual_Com_Port_StringLangID[VIRTUAL_COM_PORT_SIZ_STRING_L
 extern const uint8_t Virtual_Com_Port_StringVendor[VIRTUAL_COM_PORT_SIZ_STRING_VENDOR];
 extern const uint8_t Virtual_Com_Port_StringProduct[VIRTUAL_COM_PORT_SIZ_STRING_PRODUCT];
 extern uint8_t Virtual_Com_Port_StringSerial[VIRTUAL_COM_PORT_SIZ_STRING_SERIAL];
+extern const uint8_t Virtual_Com_Port_StringMSOS[VIRTUAL_COM_PORT_SIZ_STRING_MSOS];
+extern const uint8_t Virtual_Com_Port_MSOS20DescriptorSet[VIRTUAL_COM_PORT_SIZ_MSOS20];
 
 #endif /* __USB_DESC_H */

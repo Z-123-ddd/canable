@@ -14,6 +14,7 @@
 #include <QDialog>
 #include <QString>
 #include <QVector>
+#include <QDateTime>
 
 class QComboBox;
 class QLabel;
@@ -26,6 +27,11 @@ struct ClipRecord {
     bool fd = false;         // CAN FD
     bool brs = false;        // FD 位速率切换
     QByteArray data;         // 0..64 字节
+    // 该帧在主机侧的接收时刻（本地时间，毫秒）。0 = 未知（例如自测造的假数据、
+    // 或来源没有时间信息），此时导出会留空而不是编造一个时间。
+    qint64 tsMs = 0;
+    // 记录时间戳的渲染（HH:mm:ss.zzz）；tsMs==0 时返回空串
+    static QString stampText(qint64 ms);
 };
 
 class CommandClipboardDialog : public QDialog
@@ -44,7 +50,9 @@ public:
     // 剪切文本："帧ID|数据|标准/扩展"，每行一条（供显示/复制/自测）
     static QString pipeText(const QVector<ClipRecord> &records);
     // 生成指定格式的导出文本（供导出文件/自测）
-    static QString exportText(const QVector<ClipRecord> &records, Format fmt);
+    // stamp = 本次导出动作的时间（写入文件头注释）；无效值则不加该行
+    static QString exportText(const QVector<ClipRecord> &records, Format fmt,
+                              const QDateTime &stamp = QDateTime());
     // 指定格式的默认文件扩展名（不含点）
     static QString defaultExt(Format fmt);
     // 指定格式的 QFileDialog 过滤器

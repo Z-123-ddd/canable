@@ -8,7 +8,9 @@
 # ============================================================================
 set -euo pipefail
 
-APPVER="${APPVER:-30.0.7}"
+APPVER="${APPVER:-30.0.9}"
+# NSIS 的 VIProductVersion 需要四段 X.Y.Z.W
+APPVER4="${APPVER4:-${APPVER}.0}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
@@ -71,6 +73,7 @@ MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
   "/DDEPLOYDIR=$(cygpath -w "$DEPLOY_ABS")" \
   "/DOUTFILE=$(cygpath -w "$OUT_ABS")" \
   "/DAPPVER=$APPVER" \
+  "/DAPPVER4=$APPVER4" \
   "/DNPCAP_EXE=$NPCAP_EXE" \
   "$(cygpath -w "$HERE/installer/canable2_host.nsi")"
 

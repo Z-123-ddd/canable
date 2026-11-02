@@ -28,7 +28,14 @@
 
 // Bound work per main-loop turn so USB command handling stays responsive.
 #define MAIN_ERR_BURST   2
-#define MAIN_RX_BURST    8
+// Frames pushed to USB per main-loop turn: this is the CAN->USB drain-rate
+// ceiling, because the loop must turn at least (frame_rate / MAIN_RX_BURST)
+// times per second to keep up.  With 8 the ceiling sat at ~8k frames/s, which
+// is exactly the load of 8 heartbeats at 1 ms (8000 frames/s) - one slow turn
+// then let the 64-frame software RX ring overflow (ERR_CANRXFIFO_OVERFLOW).
+// 32 leaves ~4x headroom and still costs only ~64us of copying per turn, so
+// command latency stays well under 1 ms.
+#define MAIN_RX_BURST    32
 
 
 int main(void)

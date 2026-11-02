@@ -46,6 +46,19 @@ uint8_t rs485_tx_busy(void);
  *  Safe to call even if rs485_init() was never called. */
 void rs485_stop(void);
 
+/**
+ * @brief  Enable or disable the USART1 interrupt line in the NVIC.
+ *
+ * rs485_init() runs at boot even while the adapter is in CAN mode.  With an
+ * undriven/floating RS485 RX line the USART asserts IDLE and framing/overrun
+ * flags continuously, and because USART1_IRQHandler only clears TC the
+ * interrupt is re-entered forever - that starves the main loop and takes the
+ * whole device down (USB included).  The line is therefore only enabled once
+ * RS485 mode is actually selected, and disabled again when leaving it.
+ * @param  state  ENABLE while in RS485 mode, DISABLE otherwise
+ */
+void rs485_irq_set(int state);
+
 /** @return number of received bytes currently available in the RX ring. */
 uint16_t rs485_rx_available(void);
 

@@ -133,6 +133,7 @@ cd host
 - 命令帧 `AA AA | CMD | VALUE(4, LE)`
   - 1 SET_BITRATE(Hz) / 2 TX_START(0单次,1连续) / 3 TX_STOP
   - 4 GET_STATUS / 5 ENTER_DFU / 6 SET_INTERVAL(ms) / 7 SET_MODE(0单帧,1列表)
+- 8 SET_DATA_BITRATE / 9 SET_WORK_MODE / 10 GET_VERSION / 11 SET_PAUSE / 12 CLEAR_ERRORS(清除固件错误)
 - 数据帧 `AA AB | ID(2/4) | CTRL | DATA | CRC`
   - CTRL: bit7 FDF, bit6 BRS, bit5 RTR, bits3..0 DLC
   - CRC: 经典 CRC-15 / FD<=16 CRC-17 / FD>16 CRC-21（MSB-first, init0, xorout0）
