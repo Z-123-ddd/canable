@@ -1,6 +1,15 @@
 # CANable2-N32 固件说明书（USB 二进制协议）
 
-本文档描述本固件（N32H473 移植版）与上位机之间的 **USB 二进制协议**：命令/数据帧的字节格式、CRC 校验、支持的命令、数据帧编码、波特率、状态查询与错误寄存器，以及 DFU 下载切换。适用于需要对接本固件的上位机开发。
+> ## ⚠️ 帧格式以 [`USB_FRAME_PROTOCOL.md`](USB_FRAME_PROTOCOL.md) 为准
+>
+> 那份文档是**唯一权威**的帧打包/解包规范：包含 CMD 1–12 完整字典、
+> 标准/扩展 × 经典/FD × 数据/远程 全部 8 种组合矩阵、每个组合的逐字节示例、
+> 参考实现代码与常见坑清单。**如果你要自己写脚本对接本设备，请直接读那份。**
+>
+> 本文档保留固件整体说明（DFU 流程、自动波特率扫描、架构细节），
+> 帧格式部分仅作摘要；此前存在的错误已在本版修正（见文末修订记录）。
+
+本文档描述本固件（N32H473 移植版）的整体设计：命令/数据帧概要、波特率、状态查询与错误寄存器，以及 DFU 下载切换。
 
 > 说明：早期版本曾使用 slcan ASCII 协议，现已弃用并全部切换为下述二进制协议（发送与接收两个方向都用二进制帧）。CAN **接收上报**（总线→USB）见 [接收上报](#接收上报-bus-to-usb)。
 
@@ -42,7 +51,7 @@
 | CMD | 名称 | VALUE 含义 | MCU 行为 |
 |---|---|---|---|
 | `1` | SET_BITRATE | 目标波特率(Hz) | 设置**仲裁段波特率**（默认 1 Mbit/s）；不支持的值置 `ERR_USB_BADFRAME`。总线开启时**热重配** FDCAN 以立即生效：**不清空发送缓存**——已入队的单帧缓存、帧列表、运行中的发送任务与接收队列均保留，可先发数据帧/设波特率再 `TX_START`（顺序无关） |
-| `2` | TX_START | `0`=单次 / `1`=连续 | 触发发送缓存的源（单帧或列表）。单次=发一遍即停；连续=按定时器间隔周期发送。连续或列表模式需开启定时器（内部处理）。无缓存可发则置 `ERR_USB_BADFRAME` |
+| `2` | TX_START | `0`=单次 / `1`=连续 | 触发发送缓存的源（单帧或列表）。单次=发一遍即停；连续=按定时器间隔周期发送。连续或列表模式需开启定时器（内部处理）。**缓存为空时静默忽略，不置任何错误位**（仅硬件级拒绝才置 `ERR_CAN_TXFAIL`） |
 | `3` | TX_STOP | — | 停止当前发送任务并关闭定时器 |
 | `4` | GET_STATUS | — | MCU 回一行 ASCII 状态（见 §7），供联机确认解析结果 |
 | `5` | ENTER_DFU | — | 停发送与定时器 → 切换系统时钟至 HSI → 跳入出厂 DFU bootloader（`0x1FFF01A1`）。**成功不返回**，主机随后可用 N32 DFU 工具下载固件 |
@@ -62,6 +71,9 @@
 ---
 
 ## 4. 数据帧（`AA AB`）
+
+> 完整规范（8 种 ID×帧类型×数据/远程组合矩阵、逐字节示例、参考代码）见
+> [`USB_FRAME_PROTOCOL.md`](USB_FRAME_PROTOCOL.md) 的 §4–§5。本节仅列要点。
 
 格式：
 
@@ -132,6 +144,10 @@ ID 宽度由**本帧 CTRL.IDE** 决定（收发均如此），不再依赖单独
 
 固件维护 **RAM 中的发送源缓存**，数据帧只写入缓存、**不会立即上总线**；实际发送由命令帧触发：
 
+> ⚠️ **最容易踩的坑**：只发 `AA AB` 数据帧时什么都**不会**发生，也**不会报错**
+> （`GET_STATUS` 显示 `cur=1` 只表示缓存里有帧）。**必须再发
+> `AA AA 02 00 00 00 00`（TX_START）** 才真正上总线。
+
 - **单帧模式**（默认）：每次数据帧覆盖"最近一帧"缓存；`TX_START` 后按 SINGLE（发一次）/ CONTINUOUS（定时周期重发最近帧）发送。
 - **列表模式**：用命令 7（`SET_MODE`，value=1）切换到 FRAMELIST 后，一串数据帧按 FIFO 追加到 **pending 缓存**（上限 20 帧，超出丢弃并置 `ERR_CAN_TXFAIL`）；`TX_START` 时：
   - pending 非空 → 整体**替换**为新的播放列表（active）；
@@ -149,7 +165,7 @@ ID 宽度由**本帧 CTRL.IDE** 决定（收发均如此），不再依赖单独
 MCU 回一行 ASCII（以 `\r` 结尾）：
 
 ```
-ST:bus=1 mode=S job=0 tmr=0 cur=1 pend=0 act=0 err=00000000
+ST:bus=1 mode=S job=0 tmr=0 cur=1 pend=0 act=0 drop=0 err=00000000
 ```
 
 | 字段 | 含义 |
@@ -161,7 +177,10 @@ ST:bus=1 mode=S job=0 tmr=0 cur=1 pend=0 act=0 err=00000000
 | `cur` | 0/1：单帧缓存是否有效（有可发的最近帧） |
 | `pend` | pending 列表帧数（本次累积未封存） |
 | `act` | active 列表帧数（已封存可播放） |
-| `err` | 8 位十六进制错误寄存器（见 §8） |
+| `drop` | **发送帧被丢弃的累计数**（TX 队列满导致） |
+| `err` | 8 位十六进制错误计数器（见 §8） |
+
+> 共 **9 个字段**。按 8 个字段解析会从 `drop` 开始整体错位。
 
 ---
 
@@ -181,6 +200,8 @@ GET_STATUS 的 `err` 字段为 32 位错误寄存器的低 8 位十六进制，�
 | 7 | ERR_USB_BADFRAME | 未知命令 / 畸形帧 |
 | 8 | ERR_USB_CRC | 诊断帧（AA AD / AA AC）CRC-8 校验失败 |
 | 9 | ERR_FRAMELIST_FULL | （历史保留；列表溢出现走 `ERR_CAN_TXFAIL`） |
+| 10 | ERR_CAN_ACK | CAN 发送无节点应答（总线上没有其它节点） |
+| 11 | ERR_CAN_BUSOFF | 严重协议错误导致 Bus-Off |
 
 错误位一般保持至复位；**`ERR_CANRXFIFO_OVERFLOW` 在 RX 队列排空后可清除**。
 
@@ -251,9 +272,9 @@ AA AB | CTRL (1B) | ID (2B 或 4B) | DATA (0..64B)
 
 **发送一帧标准 ID 0x123、经典 2 字节 `DE AD` 并单次发送**
 
-1. 发数据帧（CTRL：FDF=0/BRS=0/RTR=0/IDE=0/DLC=2 → `0x02`，ID 2B = `01 23`，DATA = `DE AD`，CRC15 覆盖 `02 01 23 DE AD`）：
+1. 发数据帧（CTRL：FDF=0/BRS=0/RTR=0/IDE=0/DLC=2 → `0x02`，ID 2B = `01 23`，DATA = `DE AD`；**无应用层 CRC**）：
    ```
-   AA AB 02 01 23 DE AD <CRC15:2B>
+   AA AB 02 01 23 DE AD
    ```
 2. 发命令帧单次发送：
    ```
@@ -263,7 +284,7 @@ AA AB | CTRL (1B) | ID (2B 或 4B) | DATA (0..64B)
 **查询状态**
 
 ```
-AA AA 04 00 00 00 00      → 回: ST:bus=1 mode=S job=0 tmr=0 cur=1 pend=0 act=0 err=00000000\r
+AA AA 04 00 00 00 00      → 回: ST:bus=1 mode=S job=0 tmr=0 cur=1 pend=0 act=0 drop=0 err=00000000\r
 ```
 
 **设置周期发送间隔为 100ms（命令 6）**
@@ -276,8 +297,8 @@ AA AA 06 64 00 00 00      ; 100 = 0x64，小端
 
 ```
 AA AA 07 01 00 00 00      ; SET_MODE: 1 = 列表模式
-AA AB 08 00 01 FF FF FF FF FF FF FF FF <CRC15>   ; 帧1  CTRL=08 ID=1 数据 FF.. 
-AA AB 08 00 01 FF FF FF FF FF FF FF FF <CRC15>   ; 帧2 …
+AA AB 08 00 01 FF FF FF FF FF FF FF FF   ; 帧1  CTRL=08 ID=0x0001 数据 8×FF
+AA AB 08 00 01 FF FF FF FF FF FF FF FF   ; 帧2 …
 AA AA 02 00 00 00 00      ; TX_START value=0 单次：列表按 FIFO 发一遍
 ```
 
@@ -295,7 +316,7 @@ AA AA 05 00 00 00 00
 
 | API | 作用 |
 |---|---|
-| `can_get_id_format()` | 读取当前 ID 格式（当前固定 STANDARD） |
+| `can_get_id_format()` | 读取当前 ID 格式（已废弃：ID 宽度改由**每帧的 `CTRL.IDE`** 决定，见 §4.2） |
 | `can_timer_enable()` / `can_timer_disable()` | 软件门控周期发送 |
 | `can_tx_start()` / `can_tx_stop()` | 直接触发/停止发送任务（命令 2/3 的内部实现） |
 
@@ -377,3 +398,17 @@ AA AD | TEXT(ASCII) | DA AA | CRC
 > 触发：`error_assert()` 将错误排入队列，**主循环**取出并发送（不在中断上下文发 USB）。
 > 上位机即使 CRC 不符也显示正文并加注“CRC 校验失败”。
 
+---
+
+## 附录 A：本版修订记录
+
+本文档此前存在以下错误，现已修正（帧格式详情见 [`USB_FRAME_PROTOCOL.md`](USB_FRAME_PROTOCOL.md)）：
+
+| # | 原问题 | 修正 |
+|---|---|---|
+| 1 | §11 示例带 `<CRC15:2B>` / `<CRC15>` | 去掉；v30.0.7 起数据帧**无**应用层 CRC |
+| 2 | §7 状态行只列 8 字段 | 补 `drop=`，明确共 **9 字段** |
+| 3 | §8 错误表到 bit 9 为止 | 补 bit 10 `ERR_CAN_ACK` / bit 11 `ERR_CAN_BUSOFF` |
+| 4 | §3 CMD 2 称"无缓存则置 `ERR_USB_BADFRAME`" | 改为**静默忽略**（源码 `rc == -1` 分支为空） |
+| 5 | §12 称 ID 格式"固定 STANDARD" | 改为按每帧 `CTRL.IDE` 决定 |
+| 6 | §6 未强调"数据帧只入缓存" | 加醒目警告框 |
